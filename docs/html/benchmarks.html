@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Benchmarks — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li class="active"><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>Benchmarks</h1>
+<p class="lead">All numbers below were measured on Solana devnet against the deployed program at <code>C4qNsrX92Nn5z8HwSZCcioMgRoLG6BzCCK6X7kRjEFoD</code>. Reproducible — the scripts are in the public repo.</p>
+
+<h2>Compute unit costs</h2>
+
+<table>
+  <thead>
+    <tr><th>Operation</th><th>CU (typical)</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Find</td><td>~2,800</td><td>height-2 tree, single descent</td></tr>
+    <tr><td>InsertFast (no split)</td><td>~3,800</td><td>parallel-safe path, header read-only</td></tr>
+    <tr><td>Insert (full path)</td><td>1,708 – 5,823</td><td>varies by tree depth</td></tr>
+    <tr><td>Insert with leaf split</td><td>~10,300 – 17,800</td><td>includes CPI to system_program for new node</td></tr>
+    <tr><td>DeleteFast</td><td>~5,000</td><td>shift-delete only, no rebalance</td></tr>
+    <tr><td>Delete with borrow rebalance</td><td>~15,556</td><td>sibling rotation + parent separator update</td></tr>
+    <tr><td>Range scan (16 entries)</td><td>20,291</td><td>walks leaf chain across multiple accounts</td></tr>
+  </tbody>
+</table>
+
+<p>For context: a typical Anchor-based program operation on Solana costs 15,000–30,000 CU just for account validation and deserialization. Torna does the whole insert in that budget.</p>
+
+<h2>The parallelism benchmark</h2>
+
+<p>The headline experiment. We built a tree with 200 sparse keys (stride-1000 to create six leaves with non-overlapping ranges). Then we issued six insert transactions, each targeting a different leaf. Two ways:</p>
+
+<ul>
+  <li><strong>Serial:</strong> send one transaction, wait for confirmation, send the next, wait, send the next, and so on for all six.</li>
+  <li><strong>Parallel:</strong> send all six transactions simultaneously via <code>Promise.all()</code>, with the same recent blockhash, signed in advance.</li>
+</ul>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-value">4,727 ms</div>
+    <div class="metric-label">serial wall time, 6 different slots</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">731 ms</div>
+    <div class="metric-label">parallel wall time, all 6 in slot 461684841</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">6.47×</div>
+    <div class="metric-label">speedup</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">6 tx / slot</div>
+    <div class="metric-label">density (parallel run)</div>
+  </div>
+</div>
+
+<p>Every parallel transaction landed in the same slot. Devnet was not under unusual load. Same payer, same RPC, same program. The only difference between the runs was whether each transaction declared the tree header as writable (serial path) or read-only (parallel FAST path).</p>
+
+<p>This is the result you'd expect, given the Solana scheduler's rules. It's also the result Phoenix and OpenBook cannot produce, because their data structure makes header read-only impossible.</p>
+
+<h2>Cost economics</h2>
+
+<p>Each B+ tree node is an 8 KB Solana account. Rent-exempt: ~0.057 SOL per node. The tree header is 80 bytes: ~0.0008 SOL.</p>
+
+<p>A 200-entry tree built with sparse keys typically settles at five nodes — one internal root plus four leaves. Total:</p>
+
+<table>
+  <tr><th>Item</th><th>Cost (SOL)</th></tr>
+  <tr><td>Tree header (80 B)</td><td>~0.0008</td></tr>
+  <tr><td>5 node accounts (8 KB each)</td><td>~0.143</td></tr>
+  <tr><td>Transaction fees (200 inserts × ~5000 lamports)</td><td>~0.001</td></tr>
+  <tr><td><strong>Total</strong></td><td><strong>~0.18 SOL</strong></td></tr>
+</table>
+
+<p>If we'd done worst-case pre-allocation (the naïve approach where every insert reserves up to <code>height+1</code> spare accounts upfront), the same workload would have cost ~17 SOL — most of it wasted on accounts that were never consumed. The PDA-based on-demand allocation eliminates that waste entirely.</p>
+
+<h2>Capacity at fanout 64</h2>
+
+<p>At KEYS_PER_NODE_MAX = 64, the tree grows in height as splits propagate:</p>
+
+<table>
+  <tr><th>Height</th><th>Max entries</th><th>Max nodes</th><th>Cost (est.)</th></tr>
+  <tr><td>1 (leaf only)</td><td>64</td><td>1</td><td>0.057 SOL</td></tr>
+  <tr><td>2</td><td>4,096</td><td>~65</td><td>~3.7 SOL</td></tr>
+  <tr><td>3</td><td>262,144</td><td>~4,100</td><td>~234 SOL</td></tr>
+  <tr><td>4</td><td>16,777,216</td><td>~263,000</td><td>~15,000 SOL</td></tr>
+</table>
+
+<p>The cost looks steep at the high end — that's an inevitable consequence of storing 8 KB per account with Solana's rent model. The relevant comparison isn't to free; it's to alternatives. A Phoenix slab capped at 10 MB costs ~57 SOL (one rent-exempt 10 MB account) and holds far fewer entries than a height-3 Torna tree at the same SOL budget, with the added constraint of zero parallelism. spl-account-compression is dramatically cheaper at scale but offers no order.</p>
+
+<p>For real workloads, the cost lives in the height-2 to height-3 range. A DEX orderbook with 100k open orders fits comfortably in a height-3 tree built with sparse keys — the actual cost depends on how the keyspace fills.</p>
+
+<h2>Reproducing these</h2>
+
+<p>From the repo:</p>
+
+<pre><code># build + deploy
+make
+solana program deploy out/torna_btree.so --program-id out/torna_btree-keypair.json
+
+# the parallel benchmark
+cd client &amp;&amp; npm install
+SETUP_N=200 npx tsx src/bench_parallel.ts</code></pre>
+
+<p>The script outputs every transaction signature plus the slot it landed in. The "all 6 in the same slot" claim is verifiable on Solana Explorer for any reader.</p>
+
+<p>For a fully local run with no devnet costs, use <code>./scripts/ci.sh</code> which spins up <code>solana-test-validator</code>, deploys, runs every demo and invariant check, then tears down.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="how.html">How It Works</a>
+  <a class="next" href="comparison.html">vs Alternatives</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

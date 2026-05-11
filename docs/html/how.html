@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How It Works — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li class="active"><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>How It Works</h1>
+<p class="lead">The whole project reduces to one observation: SBF loads every account into a single address space at transaction time, so why are we treating them like isolated islands?</p>
+
+<h2>The structure</h2>
+<p>Every node in the B+ tree is its own Solana account. Not a region inside a big account, not a virtual slot. A real, separately-addressable account with its own pubkey, its own lock, and its own 8 KB of data.</p>
+
+<p>Internal nodes hold separator keys plus child node indices. Leaves hold (key, value) pairs in sorted order plus a <code>next_leaf_idx</code> field that links each leaf to the next one. Walk the leaf chain and you've got every entry in the tree in ascending order — across as many accounts as it takes.</p>
+
+<div class="diagram">                        tree_header (PDA)
+                       ┌──────────────────┐
+                       │ root_node_idx: 3 │
+                       │ height: 2        │
+                       │ authority: ...   │
+                       └────────┬─────────┘
+                                │
+                ┌───────────────▼───────────────┐
+                │ node 3 (internal)             │
+                │ keys: [64, 128, 160]          │
+                │ children: [1, 2, 4, 5]        │
+                └─┬─────────┬─────────┬─────────┘
+                  │         │         │
+        ┌─────────▼─┐ ┌─────▼───┐ ┌───▼─────┐ ┌─────────┐
+        │ leaf 1    │ │ leaf 2  │ │ leaf 4  │ │ leaf 5  │
+        │ [0..63]   │→│ [64..127]→│ [128..159]→│[160..199]│
+        └───────────┘ └─────────┘ └─────────┘ └─────────┘
+                              ↑
+                  next_leaf_idx forms the chain</div>
+
+<h2>How accounts are named</h2>
+<p>Every account in the tree lives at a PDA (Program Derived Address) seeded from the tree ID and node index:</p>
+<ul>
+  <li><strong>Tree header:</strong> <code>PDA("torna_hdr", tree_id)</code></li>
+  <li><strong>Node N:</strong> <code>PDA("torna", tree_id, N)</code></li>
+</ul>
+<p>That means anyone holding <code>(program_id, tree_id)</code> can derive every pubkey in the tree without any local state. There's no off-chain index. There's no "let me look up the right account." You compute the address from the seeds and that's where the data lives. This makes the system trivially recoverable, trivially auditable, and trivially shareable between programs.</p>
+
+<h2>The parallelism trick</h2>
+<p>Solana parallelizes transactions whose writable account sets don't overlap. The runtime sees, for each transaction, the list of accounts it intends to read and the list it intends to write, then schedules accordingly.</p>
+
+<p>The naive way to write an insert handler would be: take the tree header as writable, take the path as writable, take the target leaf as writable. That works. It also serializes every insert through the tree header, because two transactions both wanting the header as writable can't run concurrently.</p>
+
+<p>Torna has a separate <code>InsertFast</code> instruction designed for the case where the leaf has slack capacity — no split needed. In that path:</p>
+<ul>
+  <li>Tree header is declared <em>read-only</em></li>
+  <li>Path nodes (internal levels) are declared <em>read-only</em></li>
+  <li>Only the target leaf is declared <em>writable</em></li>
+</ul>
+
+<p>Two FAST inserts targeting different leaves have disjoint write sets — <code>{leaf_a}</code> vs <code>{leaf_b}</code>. Solana's scheduler runs them in the same slot. We measured six concurrent inserts landing in a single Solana slot on devnet (slot 461684841), a 6.47× speedup vs sending them serially.</p>
+
+<p>When a leaf <em>would</em> overflow, FAST refuses with an explicit error and the client falls back to the full <code>Insert</code> path. That path acquires the header as writable, allocates new node accounts via CPI to the system program, and handles split propagation up to the root. It serializes through the header for that transaction. But splits are rare — roughly 1 in every <code>fanout</code> inserts, so ~1.5% of operations at fanout 64.</p>
+
+<h2>Why C and not Rust</h2>
+<p>Multi-account span — the thing that makes everything else work — needs raw pointer arithmetic across accounts that live in the same SBF address space but appear in the program as separate <code>AccountInfo</code> structs. Rust's borrow checker doesn't make that easy. You can do it in unsafe blocks, but the ergonomics are painful enough that nobody on Solana has shipped it. C just lets you do it.</p>
+
+<p>The other reason is CU efficiency. Anchor adds about 5,000–10,000 CU of overhead per call for account validation and IDL machinery. A C program reading offsets directly from raw bytes skips all that. Average insert in Torna: 5,823 CU. The same operation written in Anchor would probably land between 15,000 and 20,000.</p>
+
+<h2>How allocation works</h2>
+<p>When a split happens during a full insert, the program needs new accounts to hold the split-off node(s). Naive solutions pre-allocate worst-case slots and waste rent on unused ones. Torna does it differently:</p>
+
+<ol>
+  <li>The client pre-derives PDAs for the next N possible node indices and includes them as accounts in the transaction.</li>
+  <li>The on-chain program CPIs into the system program to <em>create</em> only the accounts it actually consumes during the split.</li>
+  <li>Unused pre-passed PDAs are never created. They cost zero rent.</li>
+</ol>
+
+<p>The economic result: a 200-entry tree costs 0.18 SOL total instead of the ~17 SOL a naïve pre-allocation scheme would burn. That's a 100x improvement in rent efficiency.</p>
+
+<h2>Deletes and rebalancing</h2>
+<p>Delete works in reverse. <code>DeleteFast</code> for the common case (no rebalance needed, header read-only, parallel-safe). The full <code>Delete</code> handles the rebalance: borrow from sibling if the underflow leaf can grab a key, otherwise merge with the sibling and free the emptied account (refunding rent to the payer). If the merge causes the parent to underflow, the cascade walks up the path. If the root ends up empty, it collapses — the surviving child becomes the new root and the tree height shrinks.</p>
+
+<p>All of this happens in a single transaction. The client passes one sibling per level that might need it; the program handles the rest.</p>
+
+<h2>The authority model</h2>
+<p>Every tree has a write-authority pubkey stored in the header. Read operations (find, range scan, stats) are permissionless. Write operations check that the authority signed the transaction. There's a <code>TransferAuthority</code> instruction to hand the tree over to a new owner — the existing authority signs, the new authority pubkey replaces the old.</p>
+
+<p>The roadmap includes multi-authority delegates, which adds a list of additional authorized signers for cases like protocol-controlled trees where both the program and an admin multisig need write access.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="problem.html">The Problem</a>
+  <a class="next" href="benchmarks.html">Benchmarks</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

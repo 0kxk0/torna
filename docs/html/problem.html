@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Problem — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li class="active"><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>The Problem</h1>
+<p class="lead">Solana's account model gives you concurrency for free and order for nothing. Every team that wants sorted state ends up rolling its own slab allocator, and every one of those slabs caps their throughput at exactly one writer per slot. Torna is the primitive that's been missing.</p>
+
+<h2>What the account model gives you</h2>
+<p>Solana is a key-value store under the hood. Every account has a pubkey and a blob of bytes; that's basically the whole storage layer. Programs operate on these accounts by declaring which ones they read and which ones they write at transaction time. The runtime uses this to schedule transactions in parallel — anything with non-overlapping write sets runs concurrently.</p>
+
+<p>This is the source of Solana's headline throughput. It's also why Solana scales horizontally with hardware: more cores means more transactions per slot, as long as they touch different accounts.</p>
+
+<h2>What it doesn't give you</h2>
+<p>There's no native primitive for ordered iteration. You can look up <em>this specific account</em> by pubkey. You can't ask "give me every account whose key is between X and Y." You can't iterate them in sorted order. You can't run a leaderboard query.</p>
+
+<p>For a lot of on-chain applications, that's the bottleneck. Anything that needs:</p>
+<ul>
+  <li>A DEX orderbook (bids sorted by price, asks sorted by price)</li>
+  <li>An NFT marketplace with "cheapest 20 listings for this collection"</li>
+  <li>A DAO timeline of proposals or votes in chronological order</li>
+  <li>A leaderboard, prediction market sorted by outcome likelihood, top-N anything</li>
+  <li>A time-series store of oracle prices over a window</li>
+</ul>
+<p>...needs sorted state. Solana doesn't ship one.</p>
+
+<h2>How teams work around it today</h2>
+
+<h3>Cram everything into one account (Phoenix, OpenBook v2)</h3>
+<p>Pick a 10 MB account. Write a custom slab allocator in Rust. Bury a sorted data structure inside that one account. Phoenix and OpenBook v2 are both built this way and both work. They're also both fundamentally serial.</p>
+
+<p>Because the entire orderbook lives in one account, every write — every order placement, every cancel, every match — locks the same writable account. Solana's scheduler can't parallelize them. You hit one transaction per slot per market, period. As of late 2026, Phoenix's busiest markets are bottlenecked on exactly this.</p>
+
+<p>The 10 MB account ceiling is another problem nobody talks about much. At fanout-density typical for orderbooks, that's a few million open orders. Plenty for now. Less plenty when a real consumer-grade DEX wants to host hundreds of long-tail markets.</p>
+
+<h3>Use a compressed Merkle tree (spl-account-compression)</h3>
+<p>Compressed NFTs work because the actual leaf data lives off-chain, with only a Merkle root on-chain. Reads require off-chain proofs. <em>Membership</em> queries are efficient. <em>Order</em> doesn't exist — a Merkle tree gives you set semantics, not sorted iteration.</p>
+
+<p>Compressed accounts are a great primitive for what they do (cheap, scalable, set membership). They're the wrong primitive for orderbooks or anything that needs range scans.</p>
+
+<h3>Punt to off-chain indexers (Jupiter, most aggregators)</h3>
+<p>Compute the sort off-chain. Pass the winning route or order back on-chain to settle. This works and it's most of how Solana DeFi operates today. But it's centralized: the sorter is a trusted off-chain service. For composability — when another smart contract wants to use the sorted state — there's no on-chain answer.</p>
+
+<h2>What's missing</h2>
+<p>None of the above is a <em>primitive</em>. They're all one-off solutions built for a single use case. If you're a team starting a new DEX or marketplace, your options are: (1) re-implement Phoenix's slab from scratch, (2) accept the off-chain indexer dependency, or (3) live without sorted state.</p>
+
+<p>A real primitive would be something other programs <em>integrate</em>, not something they <em>rewrite</em>. CPI-able. Generic over key and value types. Spread across accounts so it doesn't hit the 10 MB wall. Parallel-safe so it doesn't hit the one-tx-per-slot wall.</p>
+
+<p>That's the gap Torna fills.</p>
+
+<h2>Why this is the right time</h2>
+<p>Solana's DEX volume is real and growing. The single-account designs that work today start to bend when:</p>
+<ul>
+  <li>A protocol wants to run many markets — each one with its own contention bottleneck multiplies the problem.</li>
+  <li>Order placement bursts exceed the single-account write rate. Phoenix has hit this in stress periods.</li>
+  <li>New product categories (perp DEX with thousands of markets, NFT marketplaces with millions of listings, prediction markets with continuous outcomes) need primitives that scale with the network, not against it.</li>
+</ul>
+
+<p>The window for shipping the right primitive is now, before the ecosystem standardizes on the workarounds. Torna is that primitive.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="index.html">Overview</a>
+  <a class="next" href="how.html">How It Works</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

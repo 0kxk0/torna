@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAQ — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li class="active"><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>Frequently Asked Questions</h1>
+
+<h2>Is this audited?</h2>
+<p>No. The program is on devnet. It is not ready for mainnet deployment and is explicitly not licensed for production use. The roadmap includes formal verification (v4.x) and that work is the gate for a paid third-party audit. Until then, treat Torna as a research-grade implementation suitable for evaluation, prototyping, and hackathon demos.</p>
+
+<h2>Why C and not Rust?</h2>
+<p>Two reasons. The first is structural: multi-account pointer-walking, which is the trick that makes Torna's parallelism work, is borderline impossible to express cleanly through Rust's borrow checker. You can do it in unsafe blocks, but the ergonomics are unpleasant enough that nobody has shipped this design on Solana before. C lets you treat several account buffers as a single logical address space with raw pointers, which is what the SBF runtime actually gives you.</p>
+<p>The second reason is CU efficiency. Anchor adds 5,000–10,000 compute units of overhead per call for account validation, IDL machinery, and Borsh deserialization. C reads bytes at fixed offsets directly. Torna's average insert at 5,823 CU is about a third of what an equivalent Anchor implementation would cost.</p>
+
+<h2>What's the business model?</h2>
+<p>Source-available, commercial licensing for production use. The repository is public so that hackathon judges, peers, and prospective integrators can evaluate the code, run the benchmarks, and understand the design. Commercial deployment requires a written license. The license is structured to make it straightforward for integrators to obtain reasonable terms while protecting against fork-and-compete scenarios.</p>
+<p>The longer-term thesis is that Torna becomes infrastructure other Solana protocols pay to integrate, similar to how databases are commercial software embedded in countless products.</p>
+
+<h2>Does this work on mainnet?</h2>
+<p>It would, architecturally — the SBF program is the same regardless of cluster. But the operational requirements for mainnet are different: audit, formal verification of invariants, multi-authority operational tooling, an incident response plan. None of those are complete. Hence the explicit license restriction against mainnet deployment until commercial terms are agreed.</p>
+
+<h2>How much does a tree cost to maintain?</h2>
+<p>Storage rent on Solana is a one-time deposit that's recovered when the account is closed. For Torna:</p>
+<ul>
+  <li>Tree header: ~0.0008 SOL one-time</li>
+  <li>Each B+ tree node (8 KB): ~0.029 SOL one-time</li>
+  <li>200-entry tree (5 nodes): ~0.18 SOL total</li>
+  <li>200,000-entry tree (height 3, ~3,000 nodes): ~170 SOL total</li>
+</ul>
+<p>Per-operation costs are just the transaction fee (~0.000005 SOL) plus the compute unit price the user wants to set. There are no ongoing storage charges.</p>
+
+<h2>Can I integrate this into my DEX or marketplace today?</h2>
+<p>Technically yes — the CPI interface and the Rust SDK both work. The example program in <code>examples-rust/mini_orderbook/</code> shows the integration pattern. Practically, until the audit and v3.1 (runtime variable sizes) ship, mainnet integration is premature. We're happy to talk to teams that want to integrate on devnet now and move to mainnet on a coordinated timeline.</p>
+
+<h2>What happens if Solana adds a native sorted primitive?</h2>
+<p>That would be good for the ecosystem and probably make Torna less differentiated. Two notes on this: first, the Solana Labs / Anza roadmap doesn't show this primitive landing in any near-term version — they're focused on consensus, performance, and Firedancer. Second, Torna's design (multi-account span, parallel-safe FAST paths) is architecturally aligned with how a native primitive would need to work — meaning the same techniques would carry over even if the implementation shifted.</p>
+
+<h2>How does the parallelism work, in one sentence?</h2>
+<p>Solana's scheduler runs transactions in parallel as long as their writable account sets are disjoint, and Torna's FAST instructions declare only the target leaf as writable — so writes to different leaves never block each other.</p>
+
+<h2>What's the largest tree this can hold?</h2>
+<p>At fanout 64, a height-3 tree holds 262,144 entries; height-4 holds 16.7 million. Practical maximum is bounded by Solana's per-transaction account limit (currently 64 accounts via Address Lookup Tables), which caps the path + spare slots a single insert can touch — generally translating to comfortable operation at height 4 or 5.</p>
+
+<h2>What if the tree's authority key is lost?</h2>
+<p>Today the tree becomes read-only — no further writes possible. Reads still work since they're permissionless. The roadmap (v3.2) includes multi-authority delegates and recovery via authorized signers; until then, the recommendation is to set authority to a multisig at <code>InitTree</code>.</p>
+
+<h2>Is there a TypeScript or Python client?</h2>
+<p>TypeScript, yes — full client in <code>client/src/torna.ts</code> with twelve instruction builders, PDA derivation, decoders, and retry helpers. Python is not on the immediate roadmap; community contributions welcome under the license terms.</p>
+
+<h2>Can two programs share one Torna tree?</h2>
+<p>Yes, as long as both have signing authority. The authority model is just a pubkey check — if both programs sign as the authority (typical pattern: both programs derive the same PDA), both can write. Multi-authority delegates (v3.2) make this cleaner.</p>
+
+<h2>What does "source-available" mean?</h2>
+<p>You can read the code, run it locally, evaluate it, and submit it (unmodified) to hackathons. You cannot deploy it to a public Solana network, use it in any commercial capacity, or create derivative works without a written commercial license. See <a href="license.html">License &amp; Contact</a> for the precise terms.</p>
+
+<h2>Who's behind this?</h2>
+<p>One engineer for now, with deep Solana SBF and low-level systems experience. Built and shipped in a focused sprint. The intent is to grow this into a real infrastructure project — investor and contributor inquiries welcome.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="roadmap.html">Roadmap</a>
+  <a class="next" href="license.html">License &amp; Contact</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

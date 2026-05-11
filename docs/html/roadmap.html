@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Roadmap — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li class="active"><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>Roadmap</h1>
+<p class="lead">What's shipped, what's next, and where the line is between MVP-ready and mainnet-ready.</p>
+
+<h2>Shipped (v3)</h2>
+
+<h3>Core engine</h3>
+<ul>
+  <li>Full B+ tree on Solana: insert, find, range scan, delete.</li>
+  <li>Multi-account span with PDA-derived addressing — no local state.</li>
+  <li>Splits during insert; cascading rebalance during delete; root collapse on merge.</li>
+  <li>Leaf chain for ordered iteration across many accounts.</li>
+</ul>
+
+<h3>Parallel-safe fast paths</h3>
+<ul>
+  <li><code>InsertFast</code>, <code>DeleteFast</code>, <code>BulkInsertFast</code>, <code>BulkDeleteFast</code>.</li>
+  <li>Header read-only, only target leaf writable. Disjoint writes parallelize.</li>
+  <li>Devnet benchmark: 6 concurrent inserts in one slot, 6.47× speedup.</li>
+</ul>
+
+<h3>Operational primitives</h3>
+<ul>
+  <li>Authority model with <code>TransferAuthority</code> instruction.</li>
+  <li>CPI to system_program for on-demand node allocation — only consumed accounts pay rent.</li>
+  <li>Source-available license, public repo, judge-ready for hackathons.</li>
+</ul>
+
+<h3>Tooling</h3>
+<ul>
+  <li>TypeScript client with all 12 instruction builders.</li>
+  <li>Rust SDK crate (<code>torna-sdk</code>) with CPI helpers and PDA derivation.</li>
+  <li>Example consumer program (mini orderbook) using CPI.</li>
+  <li>Anchor-compatible IDL.</li>
+  <li>Local validator CI script — zero-cost iteration.</li>
+  <li>Invariant checker with nine on-chain invariants validated post-operation.</li>
+  <li>Seeded random stress test.</li>
+</ul>
+
+<hr>
+
+<h2>v3.1 — runtime variable key and value sizes</h2>
+
+<div class="callout">
+  <div class="callout-meta">Status: design complete, implementation deferred</div>
+  <p>The tree header already carries <code>key_size</code> and <code>value_size</code>. TypeScript and Rust clients respect them. The only thing hard-coded is the on-chain stride math across roughly forty offset arithmetic sites in the C program. Mechanical work, high regression risk — deferred from v3 to land cleanly.</p>
+</div>
+
+<p>Today: keys and values are both fixed at 32 bytes. Fine for many workloads — a Pubkey fits in a value, a composite key (price + side + timestamp) packs into 32 bytes of key.</p>
+
+<p>After v3.1: keys configurable in <code>[8, 64]</code> bytes, values in <code>[1, 64]</code> bytes. Different workloads want different shapes. An NFT marketplace wants 8-byte u64 prices and 64-byte listing structs. A DAO wants 16-byte composite timestamps and 40-byte vote records. v3.1 unblocks all of them.</p>
+
+<p>Estimated landing: 2–3 weeks of focused engineering. The work itself is mechanical; the risk is regression in the most fundamental part of the layout. Tested via the existing invariant checker plus extended stress runs.</p>
+
+<h2>v3.2 — multi-authority delegates</h2>
+
+<p>Today <code>TreeHeader.authority</code> is a single pubkey. v3.2 adds a list of additional signers that can also write. The use case: protocol-owned trees where both the protocol's PDA and an admin multisig need write access. Or a DAO multi-sig managing tree state with multiple authorized roles.</p>
+
+<p>Likely implementation: extend the header to include up to <em>N</em> additional pubkeys, or move the delegate list to a side account. The latter avoids resizing the header but adds an extra account to every authorized write transaction.</p>
+
+<h2>v3.3 — Anchor codegen smoke test</h2>
+
+<p>The IDL exists. v3.3 runs it through Anchor's TypeScript codegen and validates that the generated client can actually call every instruction end-to-end without manual surgery. Cheap work, removes friction for Anchor-native teams.</p>
+
+<h2>v3.4 — on-chain events</h2>
+
+<p>Emit structured logs via <code>sol_log_data</code> on splits, merges, authority transfers, root collapses. A Geyser plugin can then index tree state changes into Postgres or any external store without polling account states. Important for analytics integrations and any product layer that needs change-data-capture.</p>
+
+<h2>v3.5 — atomic multi-leaf bulk insert</h2>
+
+<p>Today's <code>BulkInsertFast</code> targets one leaf. v3.5 supports inserting into multiple leaves in a single transaction — useful for batch order placement that hits several price levels at once, or batched vote casting that touches different time-bucketed leaves.</p>
+
+<h2>v4 — variable fanout</h2>
+
+<p>Fanout is currently 64 at compile time. Different workloads want different fanouts: high-cardinality keyspaces want bigger nodes (fewer levels, more concurrent leaves); low-cardinality dense keys want smaller nodes (less wasted space per leaf). v4 makes this a tree-level parameter set at <code>InitTree</code>, with the same 8 KB node size budget.</p>
+
+<h2>v4.x — formal verification</h2>
+
+<p>After the API stabilizes through v3.x, run the C program through a formal verifier (CBMC, Frama-C, or KLEE-style symbolic execution) to prove the B+ invariants hold under all reachable states. Pairs with a structured fuzzer that exercises insert/delete sequences and asserts invariants after every operation.</p>
+
+<p>This is the gate for an audit-ready mainnet release. Investing in it before audit reduces audit cost and dramatically narrows the bug surface.</p>
+
+<h2>Path to mainnet</h2>
+
+<p>Reading the roadmap in order: v3.1 → v3.2 give the SDK shape consumers need. v3.3 → v3.5 polish integration ergonomics and observability. v4 unlocks tuning per use case. v4.x is the rigor pass.</p>
+
+<p>Realistic timeline (single-engineer focus): six months from v3 ship to mainnet-ready, including a third-party audit. Faster with a small engineering team. The architecture itself is sound; the remaining work is hardening and ergonomics, not invention.</p>
+
+<h2>Things explicitly not planned</h2>
+
+<p>Some things stay out of scope to keep the primitive sharp:</p>
+
+<ul>
+  <li><strong>Built-in matching engine.</strong> Torna is the storage. Order matching belongs in the consumer program that uses Torna.</li>
+  <li><strong>Token transfers.</strong> Same — Torna stores keys and values, not assets.</li>
+  <li><strong>Cross-chain.</strong> Solana-only. Other chains can have their own implementations.</li>
+  <li><strong>Off-chain components.</strong> No mandatory indexer, no required RPC service. The tree is fully on-chain; clients are stateless beyond the program ID and tree ID.</li>
+</ul>
+
+<p>Discipline about what Torna is not is part of what keeps it useful as a primitive.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="comparison.html">vs Alternatives</a>
+  <a class="next" href="faq.html">FAQ</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

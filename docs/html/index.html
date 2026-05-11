@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Torna — sorted key-value store on Solana</title>
+<meta name="description" content="A B+ tree on Solana, written in C. Multi-account, parallel-safe, CPI-able as a sorted database primitive for other Solana programs.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li class="active"><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>Torna</h1>
+<p class="lead">A B+ tree on Solana. Written in C, spread across many accounts, and built so that writes to disjoint regions run in the same slot. It's the database primitive Solana programs reach for when they need ordered keys, range scans, and write throughput a single 10 MB account can't give them.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-value">6.47×</div>
+    <div class="metric-label">parallel speedup vs serial inserts (devnet, slot 461684841)</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">5,823 CU</div>
+    <div class="metric-label">average insert (full path with splits)</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">0.18 SOL</div>
+    <div class="metric-label">total cost for a 200-entry tree</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">20,291 CU</div>
+    <div class="metric-label">range scan, 16 results across multiple accounts</div>
+  </div>
+</div>
+
+<h2>What this actually is</h2>
+<p>Torna is a small Solana program that owns nothing except a logical B+ tree spread across many accounts. Other programs CPI into it the way a backend service uses Postgres. The interface is what you'd expect from a sorted store: insert, find, delete, range scan, plus the parallel-safe fast paths for high-throughput workloads.</p>
+
+<p>The closest analog from outside crypto is SQLite — a single ordered table, embedded, no daemon. Torna isn't trying to be a full DBMS. It's the one missing primitive: ordered keys, on-chain, written in a way that doesn't fight Solana's parallelism model.</p>
+
+<h2>Why it matters</h2>
+<p>Solana's account model is a hash table. Pubkey to bytes. Beautiful for concurrency — transactions declare their accounts and the scheduler runs disjoint transactions in parallel. Bad for anything that needs order: an orderbook, a price-sorted NFT marketplace, a leaderboard, a time-series oracle.</p>
+
+<p>Today, every team that needs sorted state on Solana writes their own slab allocator inside a single 10 MB account. That gets them order, fast. It also caps them at one writer per slot, because every order placement contends on the same master account. Phoenix and OpenBook are both built this way. The result is a hard ceiling on throughput that has nothing to do with Solana's actual capacity.</p>
+
+<p>Torna takes the same data structure (a balanced ordered tree) and spreads it across accounts. Two orders at different price levels write to different leaves. The Solana scheduler sees disjoint write sets. They run together.</p>
+
+<h2>Where it stands today</h2>
+<p>The program is deployed on devnet at <code>C4qNsrX92Nn5z8HwSZCcioMgRoLG6BzCCK6X7kRjEFoD</code>. Twelve instructions, including a parallel-safe fast path for both insert and delete. A Rust SDK with CPI helpers and a TypeScript client are in the repo, along with an example consumer program (a tiny orderbook) that uses Torna over CPI.</p>
+
+<p>What's not there yet: a mainnet audit, runtime-variable key and value sizes (today they're fixed at 32 bytes each), multi-authority delegation, and a few smaller items on the <a href="roadmap.html">roadmap</a>. The architecture is in place. The hardening pass is what's left.</p>
+
+<h2>Where to read next</h2>
+<ul>
+  <li><a href="problem.html">The Problem</a> — what's missing in Solana's account model and why it matters</li>
+  <li><a href="how.html">How It Works</a> — multi-account span, PDAs, the parallelism trick</li>
+  <li><a href="benchmarks.html">Benchmarks</a> — actual devnet numbers, reproducible</li>
+  <li><a href="comparison.html">vs Alternatives</a> — Phoenix, OpenBook v2, spl-account-compression</li>
+</ul>
+
+<div class="callout">
+  <div class="callout-meta">Status</div>
+  <p>Devnet only. Source-available, no production use without a commercial license. Investor and integration inquiries welcome &mdash; see <a href="license.html">License &amp; Contact</a>.</p>
+</div>
+
+<div class="footer-nav">
+  <span></span>
+  <a class="next" href="problem.html">The Problem</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

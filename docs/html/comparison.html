@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vs Alternatives — Torna</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-title">Torna</a>
+    <div class="sidebar-subtitle">A sorted key-value store on Solana, in C</div>
+  </div>
+  <ol class="sidebar-list">
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="problem.html">The Problem</a></li>
+    <li><a href="how.html">How It Works</a></li>
+    <li><a href="benchmarks.html">Benchmarks</a></li>
+    <li class="active"><a href="comparison.html">vs Alternatives</a></li>
+    <li><a href="roadmap.html">Roadmap</a></li>
+    <li><a href="faq.html">FAQ</a></li>
+    <li><a href="license.html">License &amp; Contact</a></li>
+  </ol>
+  <div class="sidebar-footer">
+    Source <a href="https://github.com/0kxk0/torna">github.com/0kxk0/torna</a>
+  </div>
+</nav>
+
+<main class="content">
+
+<h1>vs Alternatives</h1>
+<p class="lead">A clear-eyed look at the closest things on Solana today. Each one is the right answer for some workload. None of them is the right answer for the workloads Torna targets.</p>
+
+<h2>The matrix</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th></th>
+      <th>Torna</th>
+      <th>spl-account-compression</th>
+      <th>Phoenix slab</th>
+      <th>OpenBook v2</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Primitive</td><td>Multi-account B+ tree</td><td>Concurrent Merkle tree</td><td>Single-account slab</td><td>Single-account slab</td></tr>
+    <tr><td>Sorted iteration</td><td>✓</td><td>—</td><td>✓ (within one account)</td><td>✓ (within one account)</td></tr>
+    <tr><td>Range scan</td><td>✓</td><td>—</td><td>limited</td><td>limited</td></tr>
+    <tr><td>Find by key</td><td>✓</td><td>✓ via off-chain proof</td><td>✓</td><td>✓</td></tr>
+    <tr><td>Parallel writes (disjoint regions)</td><td><strong>✓</strong></td><td>—</td><td>—</td><td>—</td></tr>
+    <tr><td>Scales past 10 MB</td><td>✓</td><td>✓</td><td>—</td><td>—</td></tr>
+    <tr><td>Generic CPI primitive</td><td>✓</td><td>partial</td><td>—</td><td>—</td></tr>
+    <tr><td>Language</td><td>C / SBF</td><td>Rust / Anchor</td><td>Rust</td><td>Rust</td></tr>
+    <tr><td>CU per insert (uncontended)</td><td>~3,800 – 5,800</td><td>~25,000+</td><td>~10,000+</td><td>~15,000+</td></tr>
+  </tbody>
+</table>
+
+<h2>spl-account-compression</h2>
+
+<p>The official Solana primitive for compressed state. The backing structure is a concurrent Merkle tree, optimized for the cNFT use case where you have millions of leaves but only care about membership and updates.</p>
+
+<p><strong>Strengths.</strong> Massive scale. Millions of leaves in tens of kilobytes of on-chain state. Battle-tested at the largest cNFT collections (some with tens of millions of mints). The standard Solana team's primitive.</p>
+
+<p><strong>Weaknesses.</strong> No order. The tree gives you set semantics — you can prove a leaf exists, you can update a leaf, you can add or remove leaves. You can't ask "what's the smallest leaf?" or "give me all leaves in this range." Reads require off-chain Merkle proofs supplied by an indexer.</p>
+
+<p><strong>Verdict.</strong> Different problem. If your use case is "huge registry, point queries only" — cNFTs, allowlists, identity registries — compression is the right call and Torna is overkill. If you need <em>order</em>, compression doesn't help.</p>
+
+<h2>Phoenix slab (Phoenix V1)</h2>
+
+<p>Ellipsis Labs' orderbook DEX uses a custom slab allocator packed into a single 10 MB Solana account. The allocator is hand-tuned for matching: every order is a slot in the slab, kept in a doubly-linked list sorted by price.</p>
+
+<p><strong>Strengths.</strong> Extremely tight. CU costs are excellent because there's no path validation, no PDA derivation, no CPI — just direct indexing into the same account's bytes. For a single-market orderbook where the team controls the entire stack, it's hard to beat.</p>
+
+<p><strong>Weaknesses.</strong> All writes contend on one account. Every order placement, every cancel, every fill locks the same writable account. Solana's scheduler runs them one at a time. Phoenix's busiest markets bottleneck on exactly this.</p>
+
+<p>The 10 MB account cap is the other hard wall. At Phoenix's encoding, that's around a few million open orders per market. For most current markets, fine. For long-tail markets at scale, not enough.</p>
+
+<p><strong>Verdict.</strong> Optimized for one specific use case. Not a primitive other programs can plug into. If your protocol needs Phoenix's data structure, you can't borrow it — you have to either fork Phoenix or rewrite.</p>
+
+<h2>OpenBook v2</h2>
+
+<p>Similar shape to Phoenix in spirit. A single-account slab allocator per market, written in Rust, with the orderbook data structure compact and tightly tuned.</p>
+
+<p>Same set of tradeoffs as Phoenix: extremely efficient when the workload fits the design, no parallelism within a single market, hard cap at the account size limit, not reusable as a generic primitive outside OpenBook itself.</p>
+
+<h2>Where Torna actually wins</h2>
+
+<p>Two specific properties only Torna offers, today, as a reusable Solana primitive:</p>
+
+<h3>Sorted, range-scannable state spread across accounts</h3>
+<p>No other on-chain primitive on Solana lets you ask "give me every entry in <code>[X, Y]</code> in ascending order, even if those entries live across dozens of separate accounts." spl-account-compression is unordered. Phoenix is sorted but trapped in a single account. Range scan over leaves is the operation a real DEX, marketplace, or analytics product needs and nothing else provides as a generic primitive.</p>
+
+<h3>Parallel writes to disjoint regions</h3>
+<p>Single-account designs serialize every write through the master account. Torna parallelizes them across leaves. Devnet result: 6 inserts in 1 slot vs 6 inserts in 6 slots, a 6.47× speedup. As an integrator, that's the difference between hitting Solana's network ceiling and hitting the data structure's ceiling.</p>
+
+<h2>Where Torna loses</h2>
+
+<p>Equally important to be honest about:</p>
+
+<ul>
+  <li><strong>Pure point-membership at huge scale.</strong> spl-account-compression is cheaper if your only need is "is X in this set." A million-entry Merkle tree costs orders of magnitude less than a million-entry B+ tree.</li>
+  <li><strong>Single-market hyper-optimized matching.</strong> Phoenix's slab beats Torna on raw CU when the workload fits inside one account and you don't need parallelism. The team that wrote Phoenix burned years tuning that path; Torna's average insert at 5,823 CU is good for a generic primitive but not best-in-class for the single-account use case.</li>
+  <li><strong>No Anchor ergonomics yet.</strong> Torna ships an IDL, but the canonical client is direct TypeScript or direct Rust. If your integration relies on Anchor codegen and IDL-driven everything, that's not a frictionless story today.</li>
+</ul>
+
+<h2>When to reach for Torna</h2>
+
+<p>When all three of these are true for your workload:</p>
+
+<ol>
+  <li>You need <em>ordered</em> keys (range queries or sorted iteration are core to your product).</li>
+  <li>You expect state to either outgrow a 10 MB account or you want write parallelism today.</li>
+  <li>Your reads are hot enough that off-chain Merkle proofs would add unacceptable latency.</li>
+</ol>
+
+<p>If two of three apply, Torna is still likely the right choice. If only one applies, you might be better served by the targeted alternative.</p>
+
+<h2>The bigger picture</h2>
+
+<p>The Solana primitive layer is unevenly developed. Token-2022, account compression, address lookup tables — these are mature primitives that programs reuse without rethinking. Sorted storage has been a hole. Every team filled it themselves, which means the ecosystem has a half-dozen incompatible slab allocators and no shared substrate.</p>
+
+<p>A shared substrate is what Torna is positioned to become. The market opportunity isn't just one DEX — it's every protocol that needs sorted storage discovering that the primitive already exists and CPI-ing into it.</p>
+
+<div class="footer-nav">
+  <a class="prev" href="benchmarks.html">Benchmarks</a>
+  <a class="next" href="roadmap.html">Roadmap</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>
