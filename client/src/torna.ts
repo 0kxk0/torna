@@ -37,7 +37,14 @@ export enum Ix {
   BulkInsertFast = 9,
   BulkDeleteFast = 10,
   TransferAuthority = 11,
+  AddDelegate = 12,
+  RemoveDelegate = 13,
 }
+
+export const MAX_DELEGATES = 8;
+export const DELEGATE_ACCT_SIZE = 512;
+export const DELEGATE_MAGIC = 0x31474454; /* "TDG1" little-endian */
+export const DELEGATE_SEED = "torna_dlg";
 
 /** Build IX_TRANSFER_AUTHORITY — current authority signs to move auth to a new pubkey.
  *  ix_data: [disc=11][newAuthority[32]]
@@ -471,6 +478,111 @@ export function ixInsertFast(args: {
     })),
   ];
   return new TransactionInstruction({ programId: args.programId, keys, data });
+}
+
+/** Derive the delegate side-account PDA for a tree.
+ *  Seeds = ("torna_dlg", treeId_u32_LE). */
+export function deriveDelegatePda(
+  programId: PublicKey,
+  treeId: number,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32LE(treeId, 0);
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(DELEGATE_SEED), buf],
+    programId,
+  );
+}
+
+/** Decoded view of a delegate account. */
+export interface DelegateView {
+  magic: number;
+  treeId: number;
+  bump: number;
+  count: number;
+  delegates: PublicKey[];
+}
+
+export function decodeDelegateAccount(data: Buffer): DelegateView {
+  const magic = data.readUInt32LE(0);
+  const treeId = data.readUInt32LE(4);
+  const bump = data.readUInt8(8);
+  const count = data.readUInt8(9);
+  const delegates: PublicKey[] = [];
+  for (let i = 0; i < count; i++) {
+    const start = 12 + i * 32;
+    delegates.push(new PublicKey(Buffer.from(data.subarray(start, start + 32))));
+  }
+  return { magic, treeId, bump, count, delegates };
+}
+
+/** Build IX_ADD_DELEGATE — primary authority adds an additional signer.
+ *
+ *  ix_data: [disc=12][delegate Pubkey][bump u8][rent_lamports u64 LE]
+ *  accounts: [header(ro), payer(s,w), delegate_account(w PDA), system_program]
+ */
+export function ixAddDelegate(args: {
+  programId: PublicKey;
+  treeHeader: PublicKey;
+  primaryAuthority: PublicKey; // pays rent + signs as primary
+  delegatePda: PublicKey;
+  delegate: PublicKey;
+  delegateBump: number;
+  rentLamports: bigint;
+}): TransactionInstruction {
+  const data = Buffer.alloc(1 + 32 + 1 + 8);
+  data.writeUInt8(Ix.AddDelegate, 0);
+  args.delegate.toBuffer().copy(data, 1);
+  data.writeUInt8(args.delegateBump, 1 + 32);
+  data.writeBigUInt64LE(args.rentLamports, 1 + 32 + 1);
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [
+      { pubkey: args.treeHeader, isSigner: false, isWritable: false },
+      { pubkey: args.primaryAuthority, isSigner: true, isWritable: true },
+      { pubkey: args.delegatePda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
+/** Build IX_REMOVE_DELEGATE — primary authority removes a delegate signer.
+ *
+ *  ix_data: [disc=13][delegate Pubkey]
+ *  accounts: [header(ro), primary(s,ro), delegate_account(w)]
+ */
+export function ixRemoveDelegate(args: {
+  programId: PublicKey;
+  treeHeader: PublicKey;
+  primaryAuthority: PublicKey;
+  delegatePda: PublicKey;
+  delegate: PublicKey;
+}): TransactionInstruction {
+  const data = Buffer.alloc(1 + 32);
+  data.writeUInt8(Ix.RemoveDelegate, 0);
+  args.delegate.toBuffer().copy(data, 1);
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [
+      { pubkey: args.treeHeader, isSigner: false, isWritable: false },
+      { pubkey: args.primaryAuthority, isSigner: true, isWritable: false },
+      { pubkey: args.delegatePda, isSigner: false, isWritable: true },
+    ],
+    data,
+  });
+}
+
+/** Append a delegate account to an existing instruction's accounts list.
+ *  Use this when a delegate (not the primary authority) is signing a write
+ *  instruction — the program needs to see the delegate side account in `ka`
+ *  to validate the delegate-signer relationship. */
+export function withDelegate(
+  ix: TransactionInstruction,
+  delegateAccount: PublicKey,
+): TransactionInstruction {
+  ix.keys.push({ pubkey: delegateAccount, isSigner: false, isWritable: false });
+  return ix;
 }
 
 /** Derive the PDA for a B+ tree node at (treeId, nodeIdx).

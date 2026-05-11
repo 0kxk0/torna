@@ -55,6 +55,12 @@
 #define IX_BULK_INSERT_FAST 9   /* batch N keys into one leaf; refuses on overflow */
 #define IX_BULK_DELETE_FAST 10  /* batch delete N keys from one leaf */
 #define IX_TRANSFER_AUTHORITY 11 /* current authority signs, transfers to new */
+#define IX_ADD_DELEGATE       12 /* primary authority adds a delegate signer */
+#define IX_REMOVE_DELEGATE    13 /* primary authority removes a delegate signer */
+
+#define DELEGATE_MAGIC        0x31474454u   /* "TDG1" little-endian */
+#define MAX_DELEGATES         8
+#define DELEGATE_ACCT_SIZE    512            /* allocates with headroom for MAX_DELEGATES growth */
 
 #define KEYS_PER_NODE_MIN   (KEYS_PER_NODE_MAX / 2)   /* underflow threshold (32 for fanout 64) */
 
@@ -109,6 +115,18 @@ typedef struct __attribute__((packed)) {
 } NodeHeader;
 
 #define NODE_HEADER_SIZE 16
+
+/* Optional side account at PDA("torna_dlg", tree_id) holding up to
+ * MAX_DELEGATES additional signers that can write to the tree. Primary
+ * authority is always valid; delegates are additive. */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;            /* DELEGATE_MAGIC */
+    uint32_t tree_id;          /* back-pointer to tree */
+    uint8_t  bump;              /* PDA bump, validated against acc->key */
+    uint8_t  count;             /* number of active delegates */
+    uint8_t  reserved[2];
+    uint8_t  delegates[MAX_DELEGATES * 32];
+} DelegateAccount;
 
 /* System Program ID = 32 zero bytes. */
 static const SolPubkey SYSTEM_PROGRAM_ID = {{0}};
@@ -196,6 +214,55 @@ static bool tx_has_authority_signer(SolParameters *params, const uint8_t *author
             if (params->ka[i].key->x[b] != authority[b]) { match = false; break; }
         }
         if (match) return true;
+    }
+    return false;
+}
+
+/* Returns true if any signer matches primary authority OR a delegate
+ * registered on a delegate side account that's been passed in `ka`.
+ *
+ * Scans ka for an account whose data starts with DELEGATE_MAGIC and whose
+ * stored tree_id matches the header; verifies its address is the expected
+ * PDA derived from (program_id, "torna_dlg", tree_id, bump_from_data).
+ * If so, treats every delegate listed in that account as authorized. */
+static bool tx_has_authorized_signer(SolParameters *params, const TreeHeader *th, const SolPubkey *program_id) {
+    /* Fast path — primary authority. */
+    if (tx_has_authority_signer(params, th->authority)) return true;
+
+    /* Slow path — look for a delegate account in the tx accounts. */
+    for (uint64_t i = 0; i < params->ka_num; i++) {
+        SolAccountInfo *acc = &params->ka[i];
+        if (acc->data_len < sizeof(DelegateAccount)) continue;
+        if (!SolPubkey_same(acc->owner, program_id)) continue;
+        const DelegateAccount *d = (const DelegateAccount *)acc->data;
+        if (d->magic != DELEGATE_MAGIC) continue;
+        if (d->tree_id != th->tree_id) continue;
+        if (d->count == 0 || d->count > MAX_DELEGATES) continue;
+
+        /* Verify the account address matches PDA("torna_dlg", tree_id, bump). */
+        uint32_t tid = d->tree_id;
+        uint8_t  bump = d->bump;
+        SolSignerSeed seeds[3] = {
+            { (const uint8_t *)"torna_dlg", 9 },
+            { (const uint8_t *)&tid, 4 },
+            { (const uint8_t *)&bump, 1 },
+        };
+        SolPubkey expected_pda;
+        if (sol_create_program_address(seeds, 3, program_id, &expected_pda) != SUCCESS) continue;
+        if (!SolPubkey_same(acc->key, &expected_pda)) continue;
+
+        /* Match any delegate against any signer in ka. */
+        for (uint8_t di = 0; di < d->count; di++) {
+            const uint8_t *delegate = &d->delegates[di * 32];
+            for (uint64_t si = 0; si < params->ka_num; si++) {
+                if (!params->ka[si].is_signer) continue;
+                bool match = true;
+                for (int b = 0; b < 32; b++) {
+                    if (params->ka[si].key->x[b] != delegate[b]) { match = false; break; }
+                }
+                if (match) return true;
+            }
+        }
     }
     return false;
 }
@@ -763,7 +830,7 @@ static uint64_t do_insert(SolParameters *params) {
 
     if (path_len != th->height) return ERR_BAD_PATH;
     if (!params->ka[1].is_signer) return ERROR_MISSING_REQUIRED_SIGNATURES;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
 
     /* Spare slots live after [header, payer, sysprog, path...]. */
     uint32_t spare_base = 3 + (uint32_t)path_len;
@@ -945,7 +1012,7 @@ static uint64_t do_insert_fast(SolParameters *params) {
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
     uint16_t vs = th->value_size;
 
     if (params->data_len < (uint64_t)(1 + KEY_SIZE + vs + 1)) return ERR_BAD_IX_DATA;
@@ -956,10 +1023,12 @@ static uint64_t do_insert_fast(SolParameters *params) {
 
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
-    if (params->ka_num < (uint64_t)1 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    /* ka layout: [0]=header, [1]=authority(signer), [2..path_len+1]=path */
+    if (params->ka_num < (uint64_t)2 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    uint32_t pb = 2; /* path base */
 
     /* Descend (read-only intermediate validation). */
-    SolAccountInfo *root_acc = &params->ka[1];
+    SolAccountInfo *root_acc = &params->ka[pb];
     if (!SolPubkey_same(root_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     {
         NodeHeader *rh = node_hdr(root_acc->data);
@@ -968,7 +1037,7 @@ static uint64_t do_insert_fast(SolParameters *params) {
     }
 
     for (int level = 0; level < path_len - 1; level++) {
-        SolAccountInfo *cur = &params->ka[1 + level];
+        SolAccountInfo *cur = &params->ka[pb + level];
         NodeHeader *nh = node_hdr(cur->data);
         if (nh->is_leaf) return ERR_BAD_PATH;
         int pos = node_lower_bound(cur->data, key);
@@ -979,14 +1048,14 @@ static uint64_t do_insert_fast(SolParameters *params) {
         } else {
             desc_idx = kids[pos];
         }
-        SolAccountInfo *nxt = &params->ka[1 + level + 1];
+        SolAccountInfo *nxt = &params->ka[pb + level + 1];
         if (!SolPubkey_same(nxt->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
         NodeHeader *nh_nxt = node_hdr(nxt->data);
         if (!nh_nxt->initialized) return ERR_NODE_UNINIT;
         if (nh_nxt->node_idx != desc_idx) return ERR_BAD_PATH;
     }
 
-    SolAccountInfo *leaf_acc = &params->ka[1 + path_len - 1];
+    SolAccountInfo *leaf_acc = &params->ka[pb + path_len - 1];
     if (!leaf_acc->is_writable) return ERR_NOT_WRITABLE;
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
@@ -1019,7 +1088,7 @@ static uint64_t do_delete_fast(SolParameters *params) {
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
     uint16_t vs = th->value_size;
 
     const uint8_t *key = params->data + 1;
@@ -1027,10 +1096,12 @@ static uint64_t do_delete_fast(SolParameters *params) {
 
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
-    if (params->ka_num < (uint64_t)1 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    /* ka layout: [0]=header, [1]=authority(signer), [2..path_len+1]=path */
+    if (params->ka_num < (uint64_t)2 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    uint32_t pb = 2;
 
     /* Descend. */
-    SolAccountInfo *root_acc = &params->ka[1];
+    SolAccountInfo *root_acc = &params->ka[pb];
     if (!SolPubkey_same(root_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     {
         NodeHeader *rh = node_hdr(root_acc->data);
@@ -1039,7 +1110,7 @@ static uint64_t do_delete_fast(SolParameters *params) {
     }
 
     for (int level = 0; level < path_len - 1; level++) {
-        SolAccountInfo *cur = &params->ka[1 + level];
+        SolAccountInfo *cur = &params->ka[pb + level];
         NodeHeader *nh = node_hdr(cur->data);
         if (nh->is_leaf) return ERR_BAD_PATH;
         int pos = node_lower_bound(cur->data, key);
@@ -1050,14 +1121,14 @@ static uint64_t do_delete_fast(SolParameters *params) {
         } else {
             desc_idx = kids[pos];
         }
-        SolAccountInfo *nxt = &params->ka[1 + level + 1];
+        SolAccountInfo *nxt = &params->ka[pb + level + 1];
         if (!SolPubkey_same(nxt->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
         NodeHeader *nxt_h = node_hdr(nxt->data);
         if (!nxt_h->initialized) return ERR_NODE_UNINIT;
         if (nxt_h->node_idx != desc_idx) return ERR_BAD_PATH;
     }
 
-    SolAccountInfo *leaf_acc = &params->ka[1 + path_len - 1];
+    SolAccountInfo *leaf_acc = &params->ka[pb + path_len - 1];
     if (!leaf_acc->is_writable) return ERR_NOT_WRITABLE;
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
@@ -1119,7 +1190,7 @@ static uint64_t do_delete(SolParameters *params) {
     TreeHeader *th = (TreeHeader *)params->ka[0].data;
     if (path_len != th->height) return ERR_BAD_PATH;
     if (!params->ka[1].is_signer) return ERROR_MISSING_REQUIRED_SIGNATURES;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
     uint16_t vs = th->value_size;
 
     /* Count expected siblings and verify ka_num. */
@@ -1292,14 +1363,13 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
     uint8_t path_len = params->data[1];
     uint8_t count    = params->data[2];
     if (count == 0) return SUCCESS;
-    if (params->ka_num < (uint64_t)1 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
 
     SolAccountInfo *hdr_acc = &params->ka[0];
     if (hdr_acc->data_len < TREE_HEADER_SIZE) return ERR_NODE_TOO_SMALL;
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
     uint16_t vs = th->value_size;
@@ -1307,17 +1377,21 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
     uint64_t expected_data = (uint64_t)1 + 1 + 1 + (uint64_t)count * entry_size;
     if (params->data_len < expected_data) return ERR_BAD_IX_DATA;
 
+    /* ka layout: [0]=header, [1]=authority(signer), [2..path_len+1]=path */
+    if (params->ka_num < (uint64_t)2 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    uint32_t pb = 2;
+
     /* Descend with first key, validate path, but don't bother validating per-key. */
     const uint8_t *first_key = params->data + 3; /* + KEY_SIZE step per entry */
     {
-        SolAccountInfo *root_acc = &params->ka[1];
+        SolAccountInfo *root_acc = &params->ka[pb];
         if (!SolPubkey_same(root_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
         NodeHeader *rh = node_hdr(root_acc->data);
         if (!rh->initialized) return ERR_NODE_UNINIT;
         if (rh->node_idx != th->root_node_idx) return ERR_BAD_PATH;
 
         for (int level = 0; level < path_len - 1; level++) {
-            SolAccountInfo *cur = &params->ka[1 + level];
+            SolAccountInfo *cur = &params->ka[pb + level];
             NodeHeader *nh = node_hdr(cur->data);
             if (nh->is_leaf) return ERR_BAD_PATH;
             int pos = node_lower_bound(cur->data, first_key);
@@ -1328,7 +1402,7 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
             } else {
                 desc_idx = kids[pos];
             }
-            SolAccountInfo *nxt = &params->ka[1 + level + 1];
+            SolAccountInfo *nxt = &params->ka[pb + level + 1];
             if (!SolPubkey_same(nxt->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
             NodeHeader *nxt_h = node_hdr(nxt->data);
             if (!nxt_h->initialized) return ERR_NODE_UNINIT;
@@ -1336,7 +1410,7 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
         }
     }
 
-    SolAccountInfo *leaf_acc = &params->ka[1 + path_len - 1];
+    SolAccountInfo *leaf_acc = &params->ka[pb + path_len - 1];
     if (!leaf_acc->is_writable) return ERR_NOT_WRITABLE;
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
@@ -1372,28 +1446,30 @@ static uint64_t do_bulk_delete_fast(SolParameters *params) {
     if (count == 0) return SUCCESS;
     uint64_t expected_data = (uint64_t)1 + 1 + 1 + (uint64_t)count * KEY_SIZE;
     if (params->data_len < expected_data) return ERR_BAD_IX_DATA;
-    if (params->ka_num < (uint64_t)1 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
 
     SolAccountInfo *hdr_acc = &params->ka[0];
     if (hdr_acc->data_len < TREE_HEADER_SIZE) return ERR_NODE_TOO_SMALL;
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
-    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    if (!tx_has_authorized_signer(params, th, params->program_id)) return ERR_NOT_AUTHORIZED;
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
+    /* ka layout: [0]=header, [1]=authority(signer), [2..path_len+1]=path */
+    if (params->ka_num < (uint64_t)2 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+    uint32_t pb = 2;
 
     /* Descend with first key. */
     const uint8_t *first_key = params->data + 3;
     {
-        SolAccountInfo *root_acc = &params->ka[1];
+        SolAccountInfo *root_acc = &params->ka[pb];
         if (!SolPubkey_same(root_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
         NodeHeader *rh = node_hdr(root_acc->data);
         if (!rh->initialized) return ERR_NODE_UNINIT;
         if (rh->node_idx != th->root_node_idx) return ERR_BAD_PATH;
 
         for (int level = 0; level < path_len - 1; level++) {
-            SolAccountInfo *cur = &params->ka[1 + level];
+            SolAccountInfo *cur = &params->ka[pb + level];
             NodeHeader *nh = node_hdr(cur->data);
             if (nh->is_leaf) return ERR_BAD_PATH;
             int pos = node_lower_bound(cur->data, first_key);
@@ -1404,7 +1480,7 @@ static uint64_t do_bulk_delete_fast(SolParameters *params) {
             } else {
                 desc_idx = kids[pos];
             }
-            SolAccountInfo *nxt = &params->ka[1 + level + 1];
+            SolAccountInfo *nxt = &params->ka[pb + level + 1];
             if (!SolPubkey_same(nxt->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
             NodeHeader *nxt_h = node_hdr(nxt->data);
             if (!nxt_h->initialized) return ERR_NODE_UNINIT;
@@ -1412,7 +1488,7 @@ static uint64_t do_bulk_delete_fast(SolParameters *params) {
         }
     }
 
-    SolAccountInfo *leaf_acc = &params->ka[1 + path_len - 1];
+    SolAccountInfo *leaf_acc = &params->ka[pb + path_len - 1];
     if (!leaf_acc->is_writable) return ERR_NOT_WRITABLE;
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
@@ -1446,11 +1522,163 @@ static uint64_t do_transfer_authority(SolParameters *params) {
     uint64_t err = check_header(&params->ka[0], params->program_id);
     if (err) return err;
     TreeHeader *th = (TreeHeader *)params->ka[0].data;
+    /* Authority transfer is restricted to the PRIMARY signer — delegates
+     * cannot rotate the tree's root authority. */
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
 
     const uint8_t *new_authority = params->data + 1;
     sol_memcpy(th->authority, new_authority, 32);
     sol_log("torna: authority transferred");
+    return SUCCESS;
+}
+
+/* Helper: write 4-byte u32 little-endian into a CPI data buffer. */
+static inline void le_u32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/*
+ * IX_ADD_DELEGATE — primary authority adds an additional signer.
+ *
+ *   ix_data: [u8 disc=12][u8 delegate[32]][u8 bump][u8 rent_lamports[8 LE]]
+ *   accounts:
+ *     [0] header (read-only)
+ *     [1] payer (signer, writable)
+ *     [2] delegate_account (writable, PDA "torna_dlg",tree_id,bump)
+ *     [3] system_program
+ *
+ *   On first call (delegate_account.data_len == 0), CPIs into system_program
+ *   to allocate the account. Then appends `delegate` to its list. Idempotent
+ *   for duplicate delegates.
+ */
+static uint64_t do_add_delegate(SolParameters *params) {
+    if (params->data_len < 1 + 32 + 1 + 8) return ERR_BAD_IX_DATA;
+    if (params->ka_num < 4) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+
+    SolAccountInfo *hdr_acc = &params->ka[0];
+    if (hdr_acc->data_len < TREE_HEADER_SIZE) return ERR_NODE_TOO_SMALL;
+    if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
+    const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
+    if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
+    /* Only the PRIMARY authority can manage delegates. */
+    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+
+    SolAccountInfo *payer   = &params->ka[1];
+    SolAccountInfo *del_acc = &params->ka[2];
+
+    const uint8_t *new_delegate = params->data + 1;
+    uint8_t  bump          = params->data[1 + 32];
+    uint64_t rent_lamports = *(const uint64_t *)(params->data + 1 + 32 + 1);
+    uint32_t tree_id       = th->tree_id;
+
+    /* Create the delegate account on first use. */
+    if (del_acc->data_len == 0) {
+        uint8_t cpi_data[52];
+        le_u32(&cpi_data[0], 0);   /* system::create_account disc */
+        *(uint64_t *)&cpi_data[4]  = rent_lamports;
+        *(uint64_t *)&cpi_data[12] = (uint64_t)DELEGATE_ACCT_SIZE;
+        sol_memcpy(&cpi_data[20], params->program_id->x, 32);
+
+        SolAccountMeta metas[2] = {
+            { (SolPubkey *)payer->key,   /*signer=*/true, /*writable=*/true },
+            { (SolPubkey *)del_acc->key, /*signer=*/true, /*writable=*/true },
+        };
+        SolInstruction cpi_ix = {
+            .program_id  = (SolPubkey *)&SYSTEM_PROGRAM_ID,
+            .accounts    = metas, .account_len = 2,
+            .data        = cpi_data, .data_len = sizeof(cpi_data),
+        };
+        SolSignerSeed seeds[3] = {
+            { (const uint8_t *)"torna_dlg", 9 },
+            { (const uint8_t *)&tree_id, 4 },
+            { (const uint8_t *)&bump, 1 },
+        };
+        SolSignerSeeds signer  = { seeds, 3 };
+        SolSignerSeeds signers[1] = { signer };
+        uint64_t err = sol_invoke_signed(&cpi_ix, params->ka, params->ka_num, signers, 1);
+        if (err) return err;
+
+        DelegateAccount *d = (DelegateAccount *)del_acc->data;
+        sol_memset(del_acc->data, 0, DELEGATE_ACCT_SIZE);
+        d->magic   = DELEGATE_MAGIC;
+        d->tree_id = tree_id;
+        d->bump    = bump;
+        d->count   = 0;
+    } else {
+        /* Existing account — validate it's ours and matches tree. */
+        if (del_acc->data_len < sizeof(DelegateAccount)) return ERR_NODE_TOO_SMALL;
+        if (!SolPubkey_same(del_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
+        const DelegateAccount *d_ro = (const DelegateAccount *)del_acc->data;
+        if (d_ro->magic != DELEGATE_MAGIC) return ERR_BAD_MAGIC;
+        if (d_ro->tree_id != tree_id) return ERR_BAD_PATH;
+    }
+
+    DelegateAccount *d = (DelegateAccount *)del_acc->data;
+
+    /* Idempotent: if already a delegate, no-op. */
+    for (uint8_t i = 0; i < d->count; i++) {
+        bool match = true;
+        for (int b = 0; b < 32; b++) {
+            if (d->delegates[i * 32 + b] != new_delegate[b]) { match = false; break; }
+        }
+        if (match) return SUCCESS;
+    }
+
+    if (d->count >= MAX_DELEGATES) return ERR_HEIGHT_EXCEEDED;
+    sol_memcpy(&d->delegates[(uint64_t)d->count * 32], new_delegate, 32);
+    d->count++;
+    sol_log("torna: delegate added");
+    return SUCCESS;
+}
+
+/*
+ * IX_REMOVE_DELEGATE — primary authority removes a delegate signer.
+ *
+ *   ix_data: [u8 disc=13][u8 delegate[32]]
+ *   accounts:
+ *     [0] header (read-only)
+ *     [1] primary_authority (signer, ro)
+ *     [2] delegate_account (writable)
+ *
+ *   Removes the delegate (shift-compact). Returns ERR_KEY_NOT_FOUND if the
+ *   delegate isn't on the list.
+ */
+static uint64_t do_remove_delegate(SolParameters *params) {
+    if (params->data_len < 1 + 32) return ERR_BAD_IX_DATA;
+    if (params->ka_num < 3) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
+
+    SolAccountInfo *hdr_acc = &params->ka[0];
+    if (hdr_acc->data_len < TREE_HEADER_SIZE) return ERR_NODE_TOO_SMALL;
+    if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
+    const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
+    if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
+    if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+
+    SolAccountInfo *del_acc = &params->ka[2];
+    if (del_acc->data_len < sizeof(DelegateAccount)) return ERR_NODE_TOO_SMALL;
+    if (!SolPubkey_same(del_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
+    DelegateAccount *d = (DelegateAccount *)del_acc->data;
+    if (d->magic != DELEGATE_MAGIC) return ERR_BAD_MAGIC;
+    if (d->tree_id != th->tree_id) return ERR_BAD_PATH;
+
+    const uint8_t *target = params->data + 1;
+    int found = -1;
+    for (uint8_t i = 0; i < d->count; i++) {
+        bool match = true;
+        for (int b = 0; b < 32; b++) {
+            if (d->delegates[i * 32 + b] != target[b]) { match = false; break; }
+        }
+        if (match) { found = (int)i; break; }
+    }
+    if (found < 0) return ERR_KEY_NOT_FOUND;
+
+    /* Shift remaining left, zero the last slot. */
+    for (uint8_t i = (uint8_t)found; i + 1 < d->count; i++) {
+        sol_memcpy(&d->delegates[(uint64_t)i * 32], &d->delegates[(uint64_t)(i + 1) * 32], 32);
+    }
+    sol_memset(&d->delegates[(uint64_t)(d->count - 1) * 32], 0, 32);
+    d->count--;
+    sol_log("torna: delegate removed");
     return SUCCESS;
 }
 
@@ -1661,6 +1889,8 @@ extern uint64_t entrypoint(const uint8_t *input) {
         case IX_BULK_INSERT_FAST:    return do_bulk_insert_fast(&params);
         case IX_BULK_DELETE_FAST:    return do_bulk_delete_fast(&params);
         case IX_TRANSFER_AUTHORITY:  return do_transfer_authority(&params);
+        case IX_ADD_DELEGATE:        return do_add_delegate(&params);
+        case IX_REMOVE_DELEGATE:     return do_remove_delegate(&params);
         default: return ERR_BAD_IX_DATA;
     }
 }
