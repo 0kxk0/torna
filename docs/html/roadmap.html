@@ -71,18 +71,18 @@
 
 <hr>
 
-<h2>v3.1 — runtime variable key and value sizes</h2>
+<h2>v3.1 — runtime variable value sizes — shipped</h2>
 
 <div class="callout">
-  <div class="callout-meta">Status: design complete, implementation deferred</div>
-  <p>The tree header already carries <code>key_size</code> and <code>value_size</code>. TypeScript and Rust clients respect them. The only thing hard-coded is the on-chain stride math across roughly forty offset arithmetic sites in the C program. Mechanical work, high regression risk — deferred from v3 to land cleanly.</p>
+  <div class="callout-meta">Status: landed 2026-05-12</div>
+  <p>The on-chain stride math is now parameterised by <code>th-&gt;value_size</code> across every leaf helper, ix-data parser, and return-data writer. Stack arrays remain sized at the compile-time bound <code>VAL_SIZE_MAX = 64</code>. <code>InitTree</code> takes <code>value_size</code> in ix_data and validates it falls within <code>[1, 64]</code>.</p>
 </div>
 
-<p>Today: keys and values are both fixed at 32 bytes. Fine for many workloads — a Pubkey fits in a value, a composite key (price + side + timestamp) packs into 32 bytes of key.</p>
+<p>Before v3.1: value_size was 32 bytes at compile time. Fine for many workloads — a Pubkey fits, a composite struct of (u64, u64, status) packs.</p>
 
-<p>After v3.1: keys configurable in <code>[8, 64]</code> bytes, values in <code>[1, 64]</code> bytes. Different workloads want different shapes. An NFT marketplace wants 8-byte u64 prices and 64-byte listing structs. A DAO wants 16-byte composite timestamps and 40-byte vote records. v3.1 unblocks all of them.</p>
+<p>After v3.1: each tree picks its own value_size at creation. An NFT marketplace can use 64-byte listings; a DAO can use 40-byte vote records; an oracle index can use 8-byte u64 prices. All within the same deployed program; no recompilation needed.</p>
 
-<p>Estimated landing: 2–3 weeks of focused engineering. The work itself is mechanical; the risk is regression in the most fundamental part of the layout. Tested via the existing invariant checker plus extended stress runs.</p>
+<p>Keys remain fixed at 32 bytes — they encode composite identifiers well enough that runtime key_size hasn't been a constraint. Variable key_size is on the longer-term list but not gated.</p>
 
 <h2>v3.2 — multi-authority delegates</h2>
 

@@ -152,16 +152,15 @@ accounts as needed in one tx — only bounded by the per-tx account limit.
 
 ## Roadmap
 
-**v3.1 — runtime variable key / value sizes.**
-The header already carries `key_size` and `value_size`. The TypeScript and Rust
-clients respect them. The only thing hard-coded is the on-chain stride math
-across ~40 sites in the C program. Mechanical work, but every site is a
-potential regression. Deferred from v3 because shipping six items well beats
-shipping seven with subtle bugs in the most fundamental part of the layout.
-After this lands, trees can be created with any key size in `[8, 64]` and any
-value size in `[1, 64]`. NFT marketplaces want 8-byte u64 prices and 64-byte
-listings; DAOs want 16-byte composite timestamps and 40-byte vote records;
-analytics indexes want anything. v3.1 unblocks all of them.
+**v3.1 — runtime variable value sizes — shipped 2026-05-12.**
+Each tree now picks its own `value_size` at `InitTree` time and the on-chain
+stride math respects it across every helper, ix-data parser, and return-data
+writer. Stack arrays remain sized at the compile-time bound `VAL_SIZE_MAX = 64`.
+Values can be any width in `[1, 64]` bytes — an NFT marketplace can use 64-byte
+listing structs in the same deployed program where a DAO uses 40-byte vote
+records and an oracle index uses 8-byte u64 prices.
+Keys are still fixed at 32 bytes; runtime key_size is on the longer-term list
+but hasn't been a constraint in practice (composite keys pack well into 32).
 
 **v3.2 — multi-authority delegates.**
 Today `TreeHeader.authority` is one pubkey. v3.2 adds a list of additional
