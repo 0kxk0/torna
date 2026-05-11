@@ -84,11 +84,15 @@
 
 <p>Keys remain fixed at 32 bytes — they encode composite identifiers well enough that runtime key_size hasn't been a constraint. Variable key_size is on the longer-term list but not gated.</p>
 
-<h2>v3.2 — multi-authority delegates</h2>
+<h2>v3.2 — multi-authority delegates — shipped</h2>
 
-<p>Today <code>TreeHeader.authority</code> is a single pubkey. v3.2 adds a list of additional signers that can also write. The use case: protocol-owned trees where both the protocol's PDA and an admin multisig need write access. Or a DAO multi-sig managing tree state with multiple authorized roles.</p>
+<div class="callout">
+  <div class="callout-meta">Status: landed 2026-05-12</div>
+  <p>An optional side account at PDA <code>("torna_dlg", tree_id)</code> holds up to eight additional signers per tree. Primary authority manages the list via <code>IX_ADD_DELEGATE</code> and <code>IX_REMOVE_DELEGATE</code>; authority transfer remains primary-only by design.</p>
+</div>
 
-<p>Likely implementation: extend the header to include up to <em>N</em> additional pubkeys, or move the delegate list to a side account. The latter avoids resizing the header but adds an extra account to every authorized write transaction.</p>
+<p>Every write instruction now goes through a single authority check that accepts <em>either</em> the primary signer or any registered delegate. For tx's where a delegate is signing, the caller appends the delegate side account to the instruction's account list; the program scans for it, verifies its PDA, and validates the signing relationship. End-to-end verified on devnet — delegate-signed FAST insert runs in ~4,900 CU.</p>
+
 
 <h2>v3.3 — Anchor codegen smoke test</h2>
 

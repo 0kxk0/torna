@@ -162,12 +162,15 @@ records and an oracle index uses 8-byte u64 prices.
 Keys are still fixed at 32 bytes; runtime key_size is on the longer-term list
 but hasn't been a constraint in practice (composite keys pack well into 32).
 
-**v3.2 — multi-authority delegates.**
-Today `TreeHeader.authority` is one pubkey. v3.2 adds a list of additional
-signers that can write — needed for any setup where a protocol's program +
-its admin both need write access, or where a DAO multisig manages the tree.
-Probably needs to extend the header by another account (delegates side-table)
-since the existing 12 reserved bytes don't fit much.
+**v3.2 — multi-authority delegates — shipped 2026-05-12.**
+An optional side account at PDA `("torna_dlg", tree_id)` holds up to eight
+additional signers per tree. `IX_ADD_DELEGATE` and `IX_REMOVE_DELEGATE`
+are restricted to the primary authority. Every write instruction now goes
+through a unified `tx_has_authorized_signer` check that accepts either the
+primary or any registered delegate. Authority transfer (`IX 11`) stays
+primary-only by design — delegates can't rotate the root key.
+Same change also patched a latent FAST-path index regression that had been
+quietly breaking parallel writes since the v3 authority model landed.
 
 **v3.3 — Anchor codegen integration test.**
 The IDL exists. v3.3 actually runs it through Anchor's TypeScript codegen and
