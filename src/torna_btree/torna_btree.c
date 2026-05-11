@@ -131,6 +131,45 @@ typedef struct __attribute__((packed)) {
 /* System Program ID = 32 zero bytes. */
 static const SolPubkey SYSTEM_PROGRAM_ID = {{0}};
 
+/* ─── Event types (v3.4) ───────────────────────────────────────────────────
+ * Each event is emitted via sol_log_data and shows up in tx logs as
+ * "Program data: <base64>". The first byte is the event discriminator. */
+#define EVT_INSERT             0x01
+#define EVT_DELETE             0x02
+#define EVT_AUTHORITY_CHANGE   0x03
+#define EVT_DELEGATE_ADDED     0x04
+#define EVT_DELEGATE_REMOVED   0x05
+
+static inline void emit_event(const uint8_t *data, uint64_t len) {
+    SolBytes seg = { data, len };
+    sol_log_data(&seg, 1);
+}
+
+static void emit_kv_event(uint8_t evt, const uint8_t *key, const uint8_t *value,
+                           uint16_t vs, uint32_t leaf_idx) {
+    uint8_t buf[1 + KEY_SIZE + VAL_SIZE_MAX + 4];
+    buf[0] = evt;
+    sol_memcpy(buf + 1, key, KEY_SIZE);
+    sol_memcpy(buf + 1 + KEY_SIZE, value, vs);
+    *(uint32_t *)(buf + 1 + KEY_SIZE + (uint64_t)vs) = leaf_idx;
+    emit_event(buf, (uint64_t)(1 + KEY_SIZE + vs + 4));
+}
+
+static void emit_authority_change_event(const uint8_t *old_auth, const uint8_t *new_auth) {
+    uint8_t buf[1 + 32 + 32];
+    buf[0] = EVT_AUTHORITY_CHANGE;
+    sol_memcpy(buf + 1, old_auth, 32);
+    sol_memcpy(buf + 33, new_auth, 32);
+    emit_event(buf, sizeof(buf));
+}
+
+static void emit_delegate_event(uint8_t evt, const uint8_t *delegate) {
+    uint8_t buf[1 + 32];
+    buf[0] = evt;
+    sol_memcpy(buf + 1, delegate, 32);
+    emit_event(buf, sizeof(buf));
+}
+
 /*
  * Node body layout (offset NODE_HEADER_SIZE onward):
  *   keys[KEYS_ARRAY_SIZE][KEY_SIZE]
@@ -852,6 +891,7 @@ static uint64_t do_insert(SolParameters *params) {
         th->height            = 1;
         th->leftmost_leaf_idx = new_idx;
         th->total_entries++;
+        emit_kv_event(EVT_INSERT, key, value, vs, new_idx);
         sol_log("torna: first insert ok, height=1");
         return SUCCESS;
     }
@@ -895,6 +935,7 @@ static uint64_t do_insert(SolParameters *params) {
     err = leaf_insert(leaf_acc->data, key, value, vs);
     if (err) return err;
     th->total_entries++;
+    emit_kv_event(EVT_INSERT, key, value, vs, node_hdr(leaf_acc->data)->node_idx);
 
     /* Walk back up, splitting any node that overflowed. */
     uint8_t sep_buf[KEY_SIZE];
@@ -1063,7 +1104,10 @@ static uint64_t do_insert_fast(SolParameters *params) {
     /* Refuse if leaf would overflow — caller must use full Insert. */
     if (lh->key_count >= KEYS_PER_NODE_MAX) return ERR_NEED_SPLIT_SLOT;
 
-    return leaf_insert(leaf_acc->data, key, value, vs);
+    uint64_t ier = leaf_insert(leaf_acc->data, key, value, vs);
+    if (ier) return ier;
+    emit_kv_event(EVT_INSERT, key, value, vs, lh->node_idx);
+    return SUCCESS;
 }
 
 /*
@@ -1141,6 +1185,8 @@ static uint64_t do_delete_fast(SolParameters *params) {
         sol_set_return_data(ret, 1);
         return SUCCESS;
     }
+
+    emit_kv_event(EVT_DELETE, key, out_value, vs, lh->node_idx);
 
     uint8_t ret[1 + VAL_SIZE_MAX];
     ret[0] = 1;
@@ -1232,6 +1278,7 @@ static uint64_t do_delete(SolParameters *params) {
     err = leaf_delete(leaf_acc->data, key, out_value, vs);
     if (err) return err;
     if (th->total_entries > 0) th->total_entries--;
+    emit_kv_event(EVT_DELETE, key, out_value, vs, lh->node_idx);
 
     /* Cascade rebalance: bottom-up. Walk siblings as we go.
      * sib_consumed counts how many sibling accounts (in account_infos order)
@@ -1428,6 +1475,7 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
         }
         uint64_t err = leaf_insert(leaf_acc->data, k, v, vs);
         if (err) return err;
+        emit_kv_event(EVT_INSERT, k, v, vs, lh->node_idx);
     }
     return SUCCESS;
 }
@@ -1495,10 +1543,14 @@ static uint64_t do_bulk_delete_fast(SolParameters *params) {
 
     uint16_t deleted = 0;
     uint16_t vs = th->value_size;
+    uint8_t out_value[VAL_SIZE_MAX];
     for (uint8_t i = 0; i < count; i++) {
         const uint8_t *k = params->data + 3 + (uint64_t)i * KEY_SIZE;
-        uint64_t err = leaf_delete(leaf_acc->data, k, NULL, vs);
-        if (err == SUCCESS) deleted++;
+        uint64_t err = leaf_delete(leaf_acc->data, k, out_value, vs);
+        if (err == SUCCESS) {
+            emit_kv_event(EVT_DELETE, k, out_value, vs, lh->node_idx);
+            deleted++;
+        }
         /* skip not-found silently */
     }
 
@@ -1527,7 +1579,10 @@ static uint64_t do_transfer_authority(SolParameters *params) {
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
 
     const uint8_t *new_authority = params->data + 1;
+    uint8_t old_authority[32];
+    sol_memcpy(old_authority, th->authority, 32);
     sol_memcpy(th->authority, new_authority, 32);
+    emit_authority_change_event(old_authority, new_authority);
     sol_log("torna: authority transferred");
     return SUCCESS;
 }
@@ -1627,6 +1682,7 @@ static uint64_t do_add_delegate(SolParameters *params) {
     if (d->count >= MAX_DELEGATES) return ERR_HEIGHT_EXCEEDED;
     sol_memcpy(&d->delegates[(uint64_t)d->count * 32], new_delegate, 32);
     d->count++;
+    emit_delegate_event(EVT_DELEGATE_ADDED, new_delegate);
     sol_log("torna: delegate added");
     return SUCCESS;
 }
@@ -1678,6 +1734,7 @@ static uint64_t do_remove_delegate(SolParameters *params) {
     }
     sol_memset(&d->delegates[(uint64_t)(d->count - 1) * 32], 0, 32);
     d->count--;
+    emit_delegate_event(EVT_DELEGATE_REMOVED, target);
     sol_log("torna: delegate removed");
     return SUCCESS;
 }
