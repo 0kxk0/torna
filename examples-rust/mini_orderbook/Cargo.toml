@@ -1,0 +1,18 @@
+[package]
+name = "mini_orderbook"
+version = "0.1.0"
+edition = "2021"
+description = "Example: a minimal orderbook program that uses Torna for sorted price → order storage"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "mini_orderbook"
+
+[dependencies]
+solana-program = "2"
+torna-sdk = { path = "../../sdk-rust" }
+borsh = "1"
+
+[features]
+default = []
+no-entrypoint = []

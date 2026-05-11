@@ -1,0 +1,188 @@
+TORNA SOURCE-AVAILABLE LICENSE v1.0
+====================================
+
+Copyright (c) 2025 The Torna Author ("the TorN"). All Rights Reserved.
+
+This License governs the source code, compiled binaries, instruction
+definitions, build scripts, client libraries, SDK crates, example programs,
+documentation, and all other files contained in this repository (collectively,
+"the Software").
+
+Read this License in full before downloading, viewing, or using the Software.
+By accessing the Software, you agree to be bound by these terms. If you do
+not agree, you have no right to use the Software in any form.
+
+1. GRANT OF LIMITED RIGHTS
+   ─────────────────────────
+   Subject to your full compliance with every term and condition of this
+   License, and subject to the Author's continuing reservation of all other
+   rights, the Author grants you a personal, non-exclusive, non-transferable,
+   non-sublicensable, revocable, and limited right to:
+
+   (a) VIEW the source code of the Software for the sole purpose of
+       evaluation, study, and education;
+
+   (b) RUN the Software locally on your own equipment, against your own
+       Solana wallet, for the sole purpose of personal evaluation and
+       learning;
+
+   (c) SUBMIT the Software (in original, unmodified form) to recognized
+       Solana hackathons or grant programs (including but not limited to
+       Solana Foundation grants, Colosseum, Superteam Earn) for the sole
+       purpose of having it evaluated by judging panels.
+
+   No other rights are granted. Every right not expressly granted here is
+   reserved by the Author.
+
+2. PROHIBITED USES
+   ────────────────
+   You may NOT, without prior, written, signed authorization from the
+   Author:
+
+   (a) Deploy the Software, or any portion of it, or any program derived
+       from it, to Solana mainnet-beta, Solana mainnet, Solana devnet
+       (except as needed for purely personal evaluation under §1(b)),
+       Solana testnet, any Solana SVM-compatible network including but not
+       limited to Eclipse, Pyth Network, Sonic SVM, MagicBlock, Soon, or any
+       other public or private blockchain;
+
+   (b) Use the Software, or any portion of it, or any derivative work, in
+       any commercial product, service, application, or revenue-generating
+       activity of any kind, including offering it as a service ("SaaS"),
+       embedding it in proprietary software, or licensing it to third
+       parties;
+
+   (c) Create, prepare, or distribute any derivative work based upon the
+       Software, including but not limited to translations, ports to other
+       languages, adaptations to other blockchains, and re-implementations
+       of the algorithms, account layouts, or instruction protocols
+       documented or implemented herein;
+
+   (d) Sublicense, sell, lease, rent, transfer, or otherwise convey the
+       Software, in whole or in part, to any third party;
+
+   (e) Remove, alter, obscure, or hide any copyright notice, license
+       notice, trademark, attribution, or other proprietary marking;
+
+   (f) Use the name "Torna," any author name, or any associated branding
+       in any way that suggests endorsement of, association with, or
+       sponsorship by the Author, without prior written permission;
+
+   (g) Use the Software in any way that would compete commercially with the
+       Author, including but not limited to launching a competing on-chain
+       database primitive based on the techniques described herein.
+
+3. RESERVATION OF RIGHTS
+   ──────────────────────
+   The Author retains, exclusively and without limitation, every right not
+   expressly granted in §1, including without limitation:
+
+   - The exclusive right to commercialize the Software in any form;
+   - The exclusive right to license the Software to third parties under
+     terms more permissive than this License;
+   - The exclusive right to create derivative works, ports, adaptations,
+     and re-implementations;
+   - The exclusive right to use the Software in production;
+   - The exclusive right to use the algorithms, account layouts, and
+     instruction protocols documented or implemented herein in other works.
+
+4. PATENTS
+   ────────
+   No patent rights are granted under this License. If the Software embodies
+   any invention for which the Author has obtained, is seeking, or may seek
+   patent protection, that protection is fully reserved. You receive no
+   license, express or implied, to any such patent.
+
+5. TERMINATION
+   ────────────
+   This License terminates automatically, without notice, upon any breach
+   by you of any of its terms. Upon termination:
+
+   - You must immediately cease all access to and use of the Software;
+   - You must destroy all copies of the Software in your possession or
+     control, including any local builds, compiled binaries, or derivative
+     works (whether or not those derivatives were permitted);
+   - All rights granted to you under §1 revert immediately to the Author.
+
+   The Author may also terminate this License at any time, in their sole
+   discretion, by providing written notice. Termination does not relieve
+   you of any obligations or liabilities incurred prior to termination, and
+   §§3, 6, 7, and 8 survive termination.
+
+6. NO WARRANTY
+   ────────────
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+   WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+   NON-INFRINGEMENT, ACCURACY, COMPLETENESS, OR ANY WARRANTY ARISING OUT
+   OF COURSE OF DEALING, USAGE, OR TRADE.
+
+   THE AUTHOR DOES NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE,
+   SECURE, OR FREE OF VULNERABILITIES, OR THAT ANY DEFECTS WILL BE
+   CORRECTED. DEPLOYMENT OF THE SOFTWARE TO ANY BLOCKCHAIN ENVIRONMENT
+   IS ENTIRELY AT YOUR OWN RISK AND IS PROHIBITED UNDER §2(a) WITHOUT
+   PRIOR WRITTEN PERMISSION.
+
+7. LIMITATION OF LIABILITY
+   ────────────────────────
+   IN NO EVENT WILL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+   INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES, INCLUDING BUT
+   NOT LIMITED TO LOSS OF FUNDS, LOSS OF PROFITS, LOSS OF DATA, BUSINESS
+   INTERRUPTION, OR ANY OTHER COMMERCIAL DAMAGES OR LOSSES, HOWEVER CAUSED
+   AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE), ARISING IN ANY WAY OUT OF
+   OR IN CONNECTION WITH THE SOFTWARE OR THIS LICENSE, EVEN IF THE AUTHOR
+   HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+   IF, NOTWITHSTANDING THE FOREGOING, THE AUTHOR IS HELD LIABLE TO YOU FOR
+   ANY REASON, THE AUTHOR'S TOTAL CUMULATIVE LIABILITY UNDER THIS LICENSE
+   WILL NOT EXCEED ONE U.S. DOLLAR (USD 1.00).
+
+8. GENERAL
+   ────────
+   (a) ENTIRE AGREEMENT. This License is the entire agreement between you
+       and the Author concerning the Software. It supersedes all prior or
+       contemporaneous communications, representations, or agreements,
+       whether oral or written.
+
+   (b) NO ORAL MODIFICATIONS. No modification of this License is valid
+       unless in writing and signed by the Author.
+
+   (c) NO WAIVER. The Author's failure to enforce any provision is not a
+       waiver of that provision.
+
+   (d) SEVERABILITY. If any provision is held unenforceable, the remainder
+       of this License remains in full force and effect.
+
+   (e) GOVERNING LAW. This License is governed by the laws applicable at
+       the Author's principal place of residence, without regard to its
+       conflict-of-laws principles. Any dispute arising under this License
+       will be resolved exclusively in the courts of the Author's
+       jurisdiction.
+
+   (f) EXPORT COMPLIANCE. You agree to comply with all applicable export
+       control laws and regulations in your use of the Software.
+
+═══════════════════════════════════════════════════════════════════════════
+                           COMMERCIAL LICENSING
+═══════════════════════════════════════════════════════════════════════════
+
+For commercial licensing, custom terms, production deployment rights, or
+any use not expressly permitted under §1, contact the Author. Specify:
+
+  - Intended use case
+  - Deployment scope (mainnet / private chain / SaaS / etc.)
+  - Organization and contact information
+  - Anticipated volume and revenue
+
+The Author may, at their sole discretion, offer paid commercial licenses
+on terms to be negotiated separately. The existence of this License does
+not obligate the Author to grant any such license.
+
+═══════════════════════════════════════════════════════════════════════════
+
+This License is intentionally strict. The Software is offered publicly so
+that judges can evaluate it, peers can learn from it, and the community can
+verify the claims made in the documentation. It is not offered as
+infrastructure you may freely build on, fork, or compete with. If you want
+to use it for anything beyond personal evaluation, get a written license.

@@ -1,0 +1,19 @@
+[package]
+name = "torna-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Rust client SDK + CPI helpers for Torna — a multi-account B+ tree on Solana"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "torna_sdk"
+
+[dependencies]
+solana-program = "2"
+bytemuck = { version = "1", features = ["derive"] }
+borsh = "1"
+
+[features]
+default = []
+no-entrypoint = []

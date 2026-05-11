@@ -1,0 +1,238 @@
+{
+  "version": "0.1.0",
+  "name": "torna_btree",
+  "metadata": {
+    "address": "C4qNsrX92Nn5z8HwSZCcioMgRoLG6BzCCK6X7kRjEFoD",
+    "origin": "torna — multi-account B+ tree on Solana, in C/SBF",
+    "fanout": 64,
+    "key_size": 32,
+    "value_size": 32,
+    "node_size": 8192
+  },
+  "instructions": [
+    {
+      "name": "initTree",
+      "discriminator": 0,
+      "args": [
+        { "name": "treeId", "type": "u32" },
+        { "name": "headerBump", "type": "u8" },
+        { "name": "rentLamports", "type": "u64" }
+      ],
+      "accounts": [
+        { "name": "payer", "isMut": true, "isSigner": true },
+        {
+          "name": "treeHeader",
+          "isMut": true,
+          "isSigner": false,
+          "pda": { "seeds": [{ "kind": "const", "value": "torna_hdr" }, { "kind": "arg", "path": "treeId" }] }
+        },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
+      ]
+    },
+    {
+      "name": "insert",
+      "discriminator": 2,
+      "args": [
+        { "name": "key", "type": { "array": ["u8", 32] } },
+        { "name": "value", "type": { "array": ["u8", 32] } },
+        { "name": "rentLamports", "type": "u64" },
+        { "name": "pathLen", "type": "u8" },
+        { "name": "spareCount", "type": "u8" },
+        { "name": "spareBumps", "type": { "vec": "u8" } }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": true, "isSigner": false },
+        { "name": "payer", "isMut": true, "isSigner": true },
+        { "name": "systemProgram", "isMut": false, "isSigner": false },
+        { "name": "pathAccounts", "remaining": true, "isMut": true, "isSigner": false },
+        { "name": "spareAccounts", "remaining": true, "isMut": true, "isSigner": false, "pda": { "seeds": [{ "kind": "const", "value": "torna" }, { "kind": "account", "path": "treeHeader.treeId" }, { "kind": "computed", "value": "node_count + i" }] } }
+      ]
+    },
+    {
+      "name": "find",
+      "discriminator": 3,
+      "args": [
+        { "name": "key", "type": { "array": ["u8", 32] } },
+        { "name": "pathLen", "type": "u8" }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "pathAccounts", "remaining": true, "isMut": false, "isSigner": false }
+      ],
+      "returns": {
+        "schema": "[u8 found][u8 value[32]]",
+        "description": "found=1 means key existed; value contains the stored bytes"
+      }
+    },
+    {
+      "name": "rangeScan",
+      "discriminator": 4,
+      "args": [
+        { "name": "startKey", "type": { "array": ["u8", 32] } },
+        { "name": "endKey", "type": { "array": ["u8", 32] } },
+        { "name": "pathLen", "type": "u8" },
+        { "name": "maxResults", "type": "u8" }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "pathAccounts", "remaining": true, "isMut": false, "isSigner": false },
+        { "name": "chainAccounts", "remaining": true, "isMut": false, "isSigner": false }
+      ],
+      "returns": {
+        "schema": "[u16 count][(key[32] + value[32]) * count]",
+        "description": "ascending-key entries in [startKey, endKey]"
+      }
+    },
+    {
+      "name": "stats",
+      "discriminator": 5,
+      "args": [],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false }
+      ],
+      "returns": { "schema": "TreeHeader (80 bytes)" }
+    },
+    {
+      "name": "insertFast",
+      "discriminator": 6,
+      "args": [
+        { "name": "key", "type": { "array": ["u8", 32] } },
+        { "name": "value", "type": { "array": ["u8", 32] } },
+        { "name": "pathLen", "type": "u8" }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "authority", "isMut": false, "isSigner": true },
+        { "name": "pathAccounts", "remaining": true, "isMut": "lastOnly", "isSigner": false }
+      ],
+      "notes": "header read-only ⇒ parallel-safe across different leaves. Refuses with ERR_NEED_SPLIT_SLOT if leaf is full."
+    },
+    {
+      "name": "deleteFast",
+      "discriminator": 7,
+      "args": [
+        { "name": "key", "type": { "array": ["u8", 32] } },
+        { "name": "pathLen", "type": "u8" }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "authority", "isMut": false, "isSigner": true },
+        { "name": "pathAccounts", "remaining": true, "isMut": "lastOnly", "isSigner": false }
+      ],
+      "returns": { "schema": "[u8 found][u8 value[32]]" }
+    },
+    {
+      "name": "delete",
+      "discriminator": 8,
+      "args": [
+        { "name": "key", "type": { "array": ["u8", 32] } },
+        { "name": "pathLen", "type": "u8" },
+        { "name": "siblingSides", "type": { "vec": "u8" }, "description": "byte per level: 0=none, 1=right, 2=left" }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": true, "isSigner": false },
+        { "name": "payer", "isMut": true, "isSigner": true },
+        { "name": "pathAccounts", "remaining": true, "isMut": true, "isSigner": false },
+        { "name": "siblings", "remaining": true, "isMut": true, "isSigner": false }
+      ],
+      "notes": "cascading rebalance up to root with borrow/merge; merge frees node accounts and refunds rent to payer"
+    },
+    {
+      "name": "bulkInsertFast",
+      "discriminator": 9,
+      "args": [
+        { "name": "pathLen", "type": "u8" },
+        { "name": "count", "type": "u8" },
+        { "name": "entries", "type": { "vec": { "defined": "BulkEntry" } } }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "authority", "isMut": false, "isSigner": true },
+        { "name": "pathAccounts", "remaining": true, "isMut": "lastOnly", "isSigner": false }
+      ]
+    },
+    {
+      "name": "bulkDeleteFast",
+      "discriminator": 10,
+      "args": [
+        { "name": "pathLen", "type": "u8" },
+        { "name": "count", "type": "u8" },
+        { "name": "keys", "type": { "vec": { "array": ["u8", 32] } } }
+      ],
+      "accounts": [
+        { "name": "treeHeader", "isMut": false, "isSigner": false },
+        { "name": "authority", "isMut": false, "isSigner": true },
+        { "name": "pathAccounts", "remaining": true, "isMut": "lastOnly", "isSigner": false }
+      ],
+      "returns": { "schema": "[u16 deletedCount]" }
+    }
+  ],
+  "accounts": [
+    {
+      "name": "TreeHeader",
+      "size": 80,
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "magic", "type": "u32", "description": "= 0x30544254 (TBT0)" },
+          { "name": "treeId", "type": "u32" },
+          { "name": "rootNodeIdx", "type": "u32" },
+          { "name": "height", "type": "u32" },
+          { "name": "nodeCount", "type": "u32" },
+          { "name": "leftmostLeafIdx", "type": "u32" },
+          { "name": "keySize", "type": "u16" },
+          { "name": "valueSize", "type": "u16" },
+          { "name": "totalEntries", "type": "u64" },
+          { "name": "authority", "type": { "array": ["u8", 32] } },
+          { "name": "reserved", "type": { "array": ["u8", 12] } }
+        ]
+      }
+    },
+    {
+      "name": "NodeHeader",
+      "size": 16,
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "isLeaf", "type": "u8" },
+          { "name": "initialized", "type": "u8" },
+          { "name": "keyCount", "type": "u16" },
+          { "name": "nodeIdx", "type": "u32" },
+          { "name": "parentIdx", "type": "u32" },
+          { "name": "nextLeafIdx", "type": "u32" }
+        ]
+      },
+      "description": "Followed in-place by keys[65 * 32 bytes]; then either values[KEYS_PER_NODE_MAX * 32] for leaves OR children[66 * u32] for internal nodes."
+    }
+  ],
+  "types": [
+    {
+      "name": "BulkEntry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "key", "type": { "array": ["u8", 32] } },
+          { "name": "value", "type": { "array": ["u8", 32] } }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    { "code": 100, "name": "BadMagic" },
+    { "code": 101, "name": "BadNode" },
+    { "code": 102, "name": "NeedSplitSlot" },
+    { "code": 103, "name": "DuplicateKey" },
+    { "code": 104, "name": "KeyNotFound" },
+    { "code": 105, "name": "BadPath" },
+    { "code": 106, "name": "TreeInitTwice" },
+    { "code": 107, "name": "NodeInitTwice" },
+    { "code": 108, "name": "HeightExceeded" },
+    { "code": 109, "name": "NotWritable" },
+    { "code": 110, "name": "NodeTooSmall" },
+    { "code": 111, "name": "BadIxData" },
+    { "code": 112, "name": "TreeUninit" },
+    { "code": 113, "name": "NodeUninit" },
+    { "code": 114, "name": "WrongKeySize" },
+    { "code": 115, "name": "NotAuthorized" }
+  ]
+}

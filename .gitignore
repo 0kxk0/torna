@@ -1,0 +1,33 @@
+# build artifacts
+out/
+target/
+**/target/
+*.o
+*.so
+
+# node
+node_modules/
+dist/
+*.log
+
+# local demo state (contains keypairs — DO NOT COMMIT)
+client/state/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Solana program keypairs — these grant upgrade authority over deployed programs.
+*-keypair.json
+**/*-keypair.json
+
+# Environment / secrets
+.env
+.env.local
+*.pem
