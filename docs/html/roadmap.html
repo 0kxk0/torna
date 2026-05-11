@@ -98,9 +98,16 @@
 
 <p>The IDL exists. v3.3 runs it through Anchor's TypeScript codegen and validates that the generated client can actually call every instruction end-to-end without manual surgery. Cheap work, removes friction for Anchor-native teams.</p>
 
-<h2>v3.4 — on-chain events</h2>
+<h2>v3.4 — on-chain events — shipped</h2>
 
-<p>Emit structured logs via <code>sol_log_data</code> on splits, merges, authority transfers, root collapses. A Geyser plugin can then index tree state changes into Postgres or any external store without polling account states. Important for analytics integrations and any product layer that needs change-data-capture.</p>
+<div class="callout">
+  <div class="callout-meta">Status: landed 2026-05-12</div>
+  <p>The program emits five structured event types via <code>sol_log_data</code>: <code>Insert</code>, <code>Delete</code>, <code>AuthorityChange</code>, <code>DelegateAdded</code>, <code>DelegateRemoved</code>. Each event is one log line with a 1-byte discriminator and a packed payload. The TypeScript client ships a decoder (<code>events.ts</code>) that turns tx logs into a typed <code>TornaEvent</code> union.</p>
+</div>
+
+<p>Indexers, Geyser plugins, and analytics services can subscribe to program logs and rebuild tree state externally without polling on-chain accounts. The format is intentionally minimal — one discriminator byte, fixed-shape payload — so downstream consumers don't pay decoding overhead per event.</p>
+
+<p>Insert and Delete events carry the key, value, and target leaf index. AuthorityChange and the two delegate events carry the relevant pubkeys. The full set is emitted across the existing instructions (no new instruction surface), so existing clients keep working unchanged.</p>
 
 <h2>v3.5 — atomic multi-leaf bulk insert</h2>
 

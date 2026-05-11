@@ -177,10 +177,14 @@ The IDL exists. v3.3 actually runs it through Anchor's TypeScript codegen and
 verifies the generated client can call every instruction end-to-end. Cheap
 work, just hasn't been done.
 
-**v3.4 — on-chain events.**
-Emit structured logs via `sol_log_data` on splits, merges, authority transfers.
-A Geyser plugin can then index tree state into Postgres without polling
-account state.
+**v3.4 — on-chain events — shipped 2026-05-12.**
+Five structured event types emitted via `sol_log_data` on every state
+change: `Insert`, `Delete`, `AuthorityChange`, `DelegateAdded`,
+`DelegateRemoved`. Each is a single log line with a 1-byte discriminator
+and a packed payload. The TS client ships a decoder (`events.ts`) that
+turns tx logs into a typed `TornaEvent` union. Indexers and Geyser
+plugins can rebuild tree state externally without polling on-chain
+accounts.
 
 **v3.5 — atomic multi-leaf bulk insert.**
 `BulkInsertFast` targets one leaf today. v3.5 supports inserting into multiple
