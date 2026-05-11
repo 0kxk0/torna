@@ -27,10 +27,11 @@
 
 #define TORNA_MAGIC         0x30544254u   /* "TBT0" little-endian */
 #define KEY_SIZE            32             /* fixed: 32 bytes (Pubkey-size; encodes any common composite key) */
-#define VAL_SIZE            32             /* compile-time. Full runtime variability planned for v4 — */
-                                            /* the TreeHeader already carries value_size and the ix builders */
-                                            /* respect it; only the on-chain stride math is still hard-coded. */
-#define VAL_SIZE_MAX        VAL_SIZE       /* alias — once stride math is parameterised, raise to 64. */
+#define VAL_SIZE_MAX        64             /* compile-time max for stack arrays / layout planning */
+#define VAL_SIZE_MIN        1              /* runtime lower bound, enforced at InitTree */
+/* Per-tree value_size is now a runtime parameter stored in TreeHeader.value_size, */
+/* chosen at InitTree time and passed to every helper as `vs`. Strides + ix-data    */
+/* offsets use this value at runtime; stack arrays are sized at VAL_SIZE_MAX.       */
 
 /* Production-ish fanout: 64 keys per node ⇒ tree height stays low even for
  * millions of entries (height 3 holds 64^3 = 262k, height 4 holds 16M). */
@@ -239,6 +240,7 @@ static uint64_t check_spare(const SolAccountInfo *acc, const SolPubkey *program_
  *     [1..4]   tree_id (u32 LE)
  *     [5]      header_bump
  *     [6..13]  rent_lamports (u64 LE) — what the payer deposits
+ *     [14..15] value_size (u16 LE) — per-tree value byte width, in [1, VAL_SIZE_MAX]
  *
  *   accounts:
  *     [0]   payer          (signer, writable)
@@ -251,11 +253,13 @@ static uint64_t check_spare(const SolAccountInfo *acc, const SolPubkey *program_
  */
 static uint64_t do_init_tree(SolParameters *params) {
     if (params->ka_num < 3) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
-    if (params->data_len < 1 + 4 + 1 + 8) return ERR_BAD_IX_DATA;
+    if (params->data_len < 1 + 4 + 1 + 8 + 2) return ERR_BAD_IX_DATA;
 
     uint32_t tree_id       = *(const uint32_t *)(params->data + 1);
     uint8_t  header_bump   = params->data[5];
     uint64_t rent_lamports = *(const uint64_t *)(params->data + 6);
+    uint16_t value_size    = *(const uint16_t *)(params->data + 14);
+    if (value_size < VAL_SIZE_MIN || value_size > VAL_SIZE_MAX) return ERR_BAD_IX_DATA;
 
     SolAccountInfo *payer  = &params->ka[0];
     SolAccountInfo *header = &params->ka[1];
@@ -303,7 +307,7 @@ static uint64_t do_init_tree(SolParameters *params) {
     h->node_count        = 0;
     h->leftmost_leaf_idx = 0;
     h->key_size          = KEY_SIZE;
-    h->value_size        = VAL_SIZE;
+    h->value_size        = value_size;
     h->total_entries     = 0;
     sol_memcpy(h->authority, payer->key->x, 32);  /* payer becomes write-authority */
 
@@ -387,7 +391,7 @@ static uint64_t consume_spare_pda(
 
 /* Delete `key` from a leaf node by shifting later entries left. If
  * out_value is non-NULL, copies the deleted value out first. */
-static uint64_t leaf_delete(uint8_t *data, const uint8_t *key, uint8_t *out_value) {
+static uint64_t leaf_delete(uint8_t *data, const uint8_t *key, uint8_t *out_value, uint16_t vs) {
     NodeHeader *nh = node_hdr(data);
     uint8_t *keys = node_keys(data);
     uint8_t *vals = node_values(data);
@@ -396,11 +400,11 @@ static uint64_t leaf_delete(uint8_t *data, const uint8_t *key, uint8_t *out_valu
     if (pos >= nh->key_count || key_cmp(keys + (uint64_t)pos * KEY_SIZE, key) != 0) {
         return ERR_KEY_NOT_FOUND;
     }
-    if (out_value) sol_memcpy(out_value, vals + (uint64_t)pos * VAL_SIZE, VAL_SIZE);
+    if (out_value) sol_memcpy(out_value, vals + (uint64_t)pos * vs, vs);
 
     for (int i = pos; i < nh->key_count - 1; i++) {
         sol_memcpy(keys + (uint64_t)i * KEY_SIZE, keys + (uint64_t)(i + 1) * KEY_SIZE, KEY_SIZE);
-        sol_memcpy(vals + (uint64_t)i * VAL_SIZE, vals + (uint64_t)(i + 1) * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(vals + (uint64_t)i * vs, vals + (uint64_t)(i + 1) * vs, vs);
     }
     nh->key_count--;
     return SUCCESS;
@@ -409,7 +413,7 @@ static uint64_t leaf_delete(uint8_t *data, const uint8_t *key, uint8_t *out_valu
 /* Borrow one entry from `right` sibling into `left` leaf. The parent's
  * separator at `sep_pos` (which is the first key of right) is updated to
  * the new first key of right (after shift). */
-static void leaf_borrow_from_right(uint8_t *left, uint8_t *right, uint8_t *parent, int sep_pos) {
+static void leaf_borrow_from_right(uint8_t *left, uint8_t *right, uint8_t *parent, int sep_pos, uint16_t vs) {
     NodeHeader *lh = node_hdr(left);
     NodeHeader *rh = node_hdr(right);
     uint8_t *lk = node_keys(left);
@@ -419,13 +423,13 @@ static void leaf_borrow_from_right(uint8_t *left, uint8_t *right, uint8_t *paren
 
     /* Move right[0] to left[end]. */
     sol_memcpy(lk + (uint64_t)lh->key_count * KEY_SIZE, rk, KEY_SIZE);
-    sol_memcpy(lv + (uint64_t)lh->key_count * VAL_SIZE, rv, VAL_SIZE);
+    sol_memcpy(lv + (uint64_t)lh->key_count * vs, rv, vs);
     lh->key_count++;
 
     /* Shift right entries left by 1. */
     for (int i = 0; i < rh->key_count - 1; i++) {
         sol_memcpy(rk + (uint64_t)i * KEY_SIZE, rk + (uint64_t)(i + 1) * KEY_SIZE, KEY_SIZE);
-        sol_memcpy(rv + (uint64_t)i * VAL_SIZE, rv + (uint64_t)(i + 1) * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(rv + (uint64_t)i * vs, rv + (uint64_t)(i + 1) * vs, vs);
     }
     rh->key_count--;
 
@@ -436,7 +440,7 @@ static void leaf_borrow_from_right(uint8_t *left, uint8_t *right, uint8_t *paren
 /* Borrow one entry from `left` sibling into `right` leaf. The parent's
  * separator at `sep_pos` is set to the new right[0] (which is the
  * borrowed key). */
-static void leaf_borrow_from_left(uint8_t *left, uint8_t *right, uint8_t *parent, int sep_pos) {
+static void leaf_borrow_from_left(uint8_t *left, uint8_t *right, uint8_t *parent, int sep_pos, uint16_t vs) {
     NodeHeader *lh = node_hdr(left);
     NodeHeader *rh = node_hdr(right);
     uint8_t *lk = node_keys(left);
@@ -447,11 +451,11 @@ static void leaf_borrow_from_left(uint8_t *left, uint8_t *right, uint8_t *parent
     /* Shift right entries right by 1 to make room at index 0. */
     for (int i = rh->key_count; i > 0; i--) {
         sol_memcpy(rk + (uint64_t)i * KEY_SIZE, rk + (uint64_t)(i - 1) * KEY_SIZE, KEY_SIZE);
-        sol_memcpy(rv + (uint64_t)i * VAL_SIZE, rv + (uint64_t)(i - 1) * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(rv + (uint64_t)i * vs, rv + (uint64_t)(i - 1) * vs, vs);
     }
     /* Move left[end-1] to right[0]. */
     sol_memcpy(rk, lk + (uint64_t)(lh->key_count - 1) * KEY_SIZE, KEY_SIZE);
-    sol_memcpy(rv, lv + (uint64_t)(lh->key_count - 1) * VAL_SIZE, VAL_SIZE);
+    sol_memcpy(rv, lv + (uint64_t)(lh->key_count - 1) * vs, vs);
     rh->key_count++;
     lh->key_count--;
 
@@ -462,7 +466,7 @@ static void leaf_borrow_from_left(uint8_t *left, uint8_t *right, uint8_t *parent
 /* Merge `right` leaf into `left`. After this, `right` is empty and the
  * caller should close the right account. Parent's separator at sep_pos
  * and its child[sep_pos+1] should be removed (caller handles). */
-static uint64_t leaf_merge(uint8_t *left, uint8_t *right) {
+static uint64_t leaf_merge(uint8_t *left, uint8_t *right, uint16_t vs) {
     NodeHeader *lh = node_hdr(left);
     NodeHeader *rh = node_hdr(right);
     if (lh->key_count + rh->key_count > KEYS_PER_NODE_MAX) return ERR_BAD_NODE; /* can't fit */
@@ -474,7 +478,7 @@ static uint64_t leaf_merge(uint8_t *left, uint8_t *right) {
 
     for (int i = 0; i < rh->key_count; i++) {
         sol_memcpy(lk + (uint64_t)(lh->key_count + i) * KEY_SIZE, rk + (uint64_t)i * KEY_SIZE, KEY_SIZE);
-        sol_memcpy(lv + (uint64_t)(lh->key_count + i) * VAL_SIZE, rv + (uint64_t)i * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(lv + (uint64_t)(lh->key_count + i) * vs, rv + (uint64_t)i * vs, vs);
     }
     lh->key_count += rh->key_count;
     lh->next_leaf_idx = rh->next_leaf_idx;
@@ -602,7 +606,7 @@ static void internal_remove_at(uint8_t *data, int pos) {
 }
 
 /* Insert (key, value) into a leaf node's data buffer at sorted position. */
-static uint64_t leaf_insert(uint8_t *data, const uint8_t *key, const uint8_t *value) {
+static uint64_t leaf_insert(uint8_t *data, const uint8_t *key, const uint8_t *value, uint16_t vs) {
     NodeHeader *nh = node_hdr(data);
     uint8_t *keys = node_keys(data);
     uint8_t *vals = node_values(data);
@@ -614,17 +618,14 @@ static uint64_t leaf_insert(uint8_t *data, const uint8_t *key, const uint8_t *va
 
     /* Shift entries [pos .. key_count) one slot right. */
     if (pos < nh->key_count) {
-        uint64_t move_bytes = (uint64_t)(nh->key_count - pos);
-        /* memmove behavior — copy backwards */
         for (int i = nh->key_count; i > pos; i--) {
             sol_memcpy(keys + (uint64_t)i * KEY_SIZE, keys + (uint64_t)(i - 1) * KEY_SIZE, KEY_SIZE);
-            sol_memcpy(vals + (uint64_t)i * VAL_SIZE, vals + (uint64_t)(i - 1) * VAL_SIZE, VAL_SIZE);
+            sol_memcpy(vals + (uint64_t)i * vs, vals + (uint64_t)(i - 1) * vs, vs);
         }
-        (void)move_bytes;
     }
 
     sol_memcpy(keys + (uint64_t)pos * KEY_SIZE, key, KEY_SIZE);
-    sol_memcpy(vals + (uint64_t)pos * VAL_SIZE, value, VAL_SIZE);
+    sol_memcpy(vals + (uint64_t)pos * vs, value, vs);
     nh->key_count++;
     return SUCCESS;
 }
@@ -654,7 +655,7 @@ static void internal_insert_at(uint8_t *data, int pos, const uint8_t *sep_key, u
  * (already initialized as leaf). Move the right half of `data` into `new_data`.
  * `out_separator` receives the first key of the new (right) leaf.
  */
-static void leaf_split(uint8_t *data, uint8_t *new_data, uint8_t *out_separator) {
+static void leaf_split(uint8_t *data, uint8_t *new_data, uint8_t *out_separator, uint16_t vs) {
     NodeHeader *lh = node_hdr(data);
     NodeHeader *rh = node_hdr(new_data);
     uint8_t *l_keys = node_keys(data);
@@ -668,7 +669,7 @@ static void leaf_split(uint8_t *data, uint8_t *new_data, uint8_t *out_separator)
 
     for (int i = 0; i < moved; i++) {
         sol_memcpy(r_keys + (uint64_t)i * KEY_SIZE, l_keys + (uint64_t)(half + i) * KEY_SIZE, KEY_SIZE);
-        sol_memcpy(r_vals + (uint64_t)i * VAL_SIZE, l_vals + (uint64_t)(half + i) * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(r_vals + (uint64_t)i * vs, l_vals + (uint64_t)(half + i) * vs, vs);
     }
     rh->key_count = (uint16_t)moved;
     lh->key_count = (uint16_t)half;
@@ -738,23 +739,27 @@ static void internal_split(uint8_t *data, uint8_t *new_data, uint8_t *out_separa
  *                                   any unused spare is never allocated — costs 0.
  */
 static uint64_t do_insert(SolParameters *params) {
-    /* Min ix_data: disc + key + value + rent + path_len + spare_count = 51 bytes */
-    if (params->data_len < 1 + KEY_SIZE + VAL_SIZE + 8 + 1 + 1) return ERR_BAD_IX_DATA;
-
-    uint8_t  path_len      = params->data[1 + KEY_SIZE + VAL_SIZE + 8];
-    uint8_t  spare_count   = params->data[1 + KEY_SIZE + VAL_SIZE + 8 + 1];
-    uint64_t rent_lamports = *(const uint64_t *)(params->data + 1 + KEY_SIZE + VAL_SIZE);
-    const uint8_t *key     = params->data + 1;
-    const uint8_t *value   = params->data + 1 + KEY_SIZE;
-    const uint8_t *bumps   = params->data + 1 + KEY_SIZE + VAL_SIZE + 8 + 1 + 1;
-    uint64_t bumps_len     = params->data_len - (uint64_t)(1 + KEY_SIZE + VAL_SIZE + 8 + 1 + 1);
-    if (bumps_len < (uint64_t)spare_count) return ERR_BAD_IX_DATA;
-
-    if (params->ka_num < (uint64_t)3 + path_len + spare_count) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
-
+    /* Read header first to learn the runtime value_size. */
+    if (params->ka_num < 1) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
     uint64_t err = check_header(&params->ka[0], params->program_id);
     if (err) return err;
     TreeHeader *th = (TreeHeader *)params->ka[0].data;
+    uint16_t vs = th->value_size;
+
+    /* Min ix_data with runtime value_size = disc + key + value + rent + path_len + spare_count */
+    uint64_t min_hdr = (uint64_t)1 + KEY_SIZE + vs + 8 + 1 + 1;
+    if (params->data_len < min_hdr) return ERR_BAD_IX_DATA;
+
+    uint8_t  path_len      = params->data[1 + KEY_SIZE + vs + 8];
+    uint8_t  spare_count   = params->data[1 + KEY_SIZE + vs + 8 + 1];
+    uint64_t rent_lamports = *(const uint64_t *)(params->data + 1 + KEY_SIZE + vs);
+    const uint8_t *key     = params->data + 1;
+    const uint8_t *value   = params->data + 1 + KEY_SIZE;
+    const uint8_t *bumps   = params->data + min_hdr;
+    uint64_t bumps_len     = params->data_len - min_hdr;
+    if (bumps_len < (uint64_t)spare_count) return ERR_BAD_IX_DATA;
+
+    if (params->ka_num < (uint64_t)3 + path_len + spare_count) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
 
     if (path_len != th->height) return ERR_BAD_PATH;
     if (!params->ka[1].is_signer) return ERROR_MISSING_REQUIRED_SIGNATURES;
@@ -773,7 +778,7 @@ static uint64_t do_insert(SolParameters *params) {
                                 rent_lamports, bumps[0], &new_idx);
         if (err) return err;
         SolAccountInfo *spare = &params->ka[spare_base + 0];
-        err = leaf_insert(spare->data, key, value);
+        err = leaf_insert(spare->data, key, value, vs);
         if (err) return err;
 
         th->root_node_idx     = new_idx;
@@ -820,7 +825,7 @@ static uint64_t do_insert(SolParameters *params) {
     }
 
     /* Insert into leaf. */
-    err = leaf_insert(leaf_acc->data, key, value);
+    err = leaf_insert(leaf_acc->data, key, value, vs);
     if (err) return err;
     th->total_entries++;
 
@@ -843,7 +848,7 @@ static uint64_t do_insert(SolParameters *params) {
         SolAccountInfo *spare = &params->ka[spare_base + spare_used];
         spare_used++;
 
-        leaf_split(leaf_acc->data, spare->data, separator);
+        leaf_split(leaf_acc->data, spare->data, separator, vs);
         new_right_idx     = new_idx;
         split_propagating = 1;
     }
@@ -932,7 +937,6 @@ static uint64_t do_insert(SolParameters *params) {
  *   story that single-account designs (Phoenix, OpenBook slab) cannot offer.
  */
 static uint64_t do_insert_fast(SolParameters *params) {
-    if (params->data_len < 1 + KEY_SIZE + VAL_SIZE + 1) return ERR_BAD_IX_DATA;
     if (params->ka_num < 2) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
 
     /* Header: read-only validation only — DO NOT WRITE. */
@@ -942,10 +946,13 @@ static uint64_t do_insert_fast(SolParameters *params) {
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    uint16_t vs = th->value_size;
+
+    if (params->data_len < (uint64_t)(1 + KEY_SIZE + vs + 1)) return ERR_BAD_IX_DATA;
 
     const uint8_t *key   = params->data + 1;
     const uint8_t *value = params->data + 1 + KEY_SIZE;
-    uint8_t path_len     = params->data[1 + KEY_SIZE + VAL_SIZE];
+    uint8_t path_len     = params->data[1 + KEY_SIZE + vs];
 
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
@@ -987,7 +994,7 @@ static uint64_t do_insert_fast(SolParameters *params) {
     /* Refuse if leaf would overflow — caller must use full Insert. */
     if (lh->key_count >= KEYS_PER_NODE_MAX) return ERR_NEED_SPLIT_SLOT;
 
-    return leaf_insert(leaf_acc->data, key, value);
+    return leaf_insert(leaf_acc->data, key, value, vs);
 }
 
 /*
@@ -1013,6 +1020,7 @@ static uint64_t do_delete_fast(SolParameters *params) {
     const TreeHeader *th = (const TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    uint16_t vs = th->value_size;
 
     const uint8_t *key = params->data + 1;
     uint8_t path_len   = params->data[1 + KEY_SIZE];
@@ -1054,8 +1062,8 @@ static uint64_t do_delete_fast(SolParameters *params) {
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
 
-    uint8_t out_value[VAL_SIZE];
-    uint64_t err = leaf_delete(leaf_acc->data, key, out_value);
+    uint8_t out_value[VAL_SIZE_MAX];
+    uint64_t err = leaf_delete(leaf_acc->data, key, out_value, vs);
     if (err) {
         /* Return [u8 found=0] on not-found instead of failing the tx. */
         uint8_t ret[1] = {0};
@@ -1063,10 +1071,10 @@ static uint64_t do_delete_fast(SolParameters *params) {
         return SUCCESS;
     }
 
-    uint8_t ret[1 + VAL_SIZE];
+    uint8_t ret[1 + VAL_SIZE_MAX];
     ret[0] = 1;
-    sol_memcpy(&ret[1], out_value, VAL_SIZE);
-    sol_set_return_data(ret, sizeof(ret));
+    sol_memcpy(&ret[1], out_value, vs);
+    sol_set_return_data(ret, 1 + (uint64_t)vs);
     return SUCCESS;
 }
 
@@ -1112,6 +1120,7 @@ static uint64_t do_delete(SolParameters *params) {
     if (path_len != th->height) return ERR_BAD_PATH;
     if (!params->ka[1].is_signer) return ERROR_MISSING_REQUIRED_SIGNATURES;
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
+    uint16_t vs = th->value_size;
 
     /* Count expected siblings and verify ka_num. */
     int num_siblings = 0;
@@ -1148,8 +1157,8 @@ static uint64_t do_delete(SolParameters *params) {
     SolAccountInfo *leaf_acc = &params->ka[path_base + path_len - 1];
     NodeHeader *lh = node_hdr(leaf_acc->data);
     if (!lh->is_leaf) return ERR_BAD_PATH;
-    uint8_t out_value[VAL_SIZE];
-    err = leaf_delete(leaf_acc->data, key, out_value);
+    uint8_t out_value[VAL_SIZE_MAX];
+    err = leaf_delete(leaf_acc->data, key, out_value, vs);
     if (err) return err;
     if (th->total_entries > 0) th->total_entries--;
 
@@ -1197,9 +1206,9 @@ static uint64_t do_delete(SolParameters *params) {
             if (sibling_sides[level] == 1) {
                 int sep_pos = our_pos;
                 if (sib_nh->key_count > KEYS_PER_NODE_MIN) {
-                    leaf_borrow_from_right(cur->data, sib->data, par->data, sep_pos);
+                    leaf_borrow_from_right(cur->data, sib->data, par->data, sep_pos, vs);
                 } else {
-                    err = leaf_merge(cur->data, sib->data);
+                    err = leaf_merge(cur->data, sib->data, vs);
                     if (err) return err;
                     internal_remove_at(par->data, sep_pos);
                     close_account(sib, payer);
@@ -1207,9 +1216,9 @@ static uint64_t do_delete(SolParameters *params) {
             } else {
                 int sep_pos = our_pos - 1;
                 if (sib_nh->key_count > KEYS_PER_NODE_MIN) {
-                    leaf_borrow_from_left(sib->data, cur->data, par->data, sep_pos);
+                    leaf_borrow_from_left(sib->data, cur->data, par->data, sep_pos, vs);
                 } else {
-                    err = leaf_merge(sib->data, cur->data);
+                    err = leaf_merge(sib->data, cur->data, vs);
                     if (err) return err;
                     internal_remove_at(par->data, sep_pos);
                     if (th->leftmost_leaf_idx == cur_nh->node_idx) {
@@ -1259,10 +1268,10 @@ static uint64_t do_delete(SolParameters *params) {
     }
 
     (void)sib_consumed;
-    uint8_t ret[1 + VAL_SIZE];
+    uint8_t ret[1 + VAL_SIZE_MAX];
     ret[0] = 1;
-    sol_memcpy(&ret[1], out_value, VAL_SIZE);
-    sol_set_return_data(ret, sizeof(ret));
+    sol_memcpy(&ret[1], out_value, vs);
+    sol_set_return_data(ret, 1 + (uint64_t)vs);
     return SUCCESS;
 }
 
@@ -1283,8 +1292,6 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
     uint8_t path_len = params->data[1];
     uint8_t count    = params->data[2];
     if (count == 0) return SUCCESS;
-    uint64_t expected_data = (uint64_t)1 + 1 + 1 + (uint64_t)count * (KEY_SIZE + VAL_SIZE);
-    if (params->data_len < expected_data) return ERR_BAD_IX_DATA;
     if (params->ka_num < (uint64_t)1 + path_len) return ERROR_NOT_ENOUGH_ACCOUNT_KEYS;
 
     SolAccountInfo *hdr_acc = &params->ka[0];
@@ -1295,6 +1302,10 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
     if (!tx_has_authority_signer(params, th->authority)) return ERR_NOT_AUTHORIZED;
     if (path_len != th->height) return ERR_BAD_PATH;
     if (path_len == 0) return ERR_TREE_UNINIT;
+    uint16_t vs = th->value_size;
+    uint64_t entry_size = (uint64_t)KEY_SIZE + vs;
+    uint64_t expected_data = (uint64_t)1 + 1 + 1 + (uint64_t)count * entry_size;
+    if (params->data_len < expected_data) return ERR_BAD_IX_DATA;
 
     /* Descend with first key, validate path, but don't bother validating per-key. */
     const uint8_t *first_key = params->data + 3; /* + KEY_SIZE step per entry */
@@ -1333,15 +1344,15 @@ static uint64_t do_bulk_insert_fast(SolParameters *params) {
     /* Bulk insert: each entry calls leaf_insert. Refuse if any would overflow. */
     for (uint8_t i = 0; i < count; i++) {
         if (lh->key_count >= KEYS_PER_NODE_MAX) return ERR_NEED_SPLIT_SLOT;
-        const uint8_t *k = params->data + 3 + (uint64_t)i * (KEY_SIZE + VAL_SIZE);
+        const uint8_t *k = params->data + 3 + (uint64_t)i * entry_size;
         const uint8_t *v = k + KEY_SIZE;
         /* Also verify the key routes to this leaf — first key set the path;
          * if a later key falls outside, the result would be wrong. */
         if (i > 0) {
-            const uint8_t *prev_k = params->data + 3 + (uint64_t)(i - 1) * (KEY_SIZE + VAL_SIZE);
+            const uint8_t *prev_k = params->data + 3 + (uint64_t)(i - 1) * entry_size;
             if (key_cmp(prev_k, k) >= 0) return ERR_BAD_IX_DATA; /* not ascending */
         }
-        uint64_t err = leaf_insert(leaf_acc->data, k, v);
+        uint64_t err = leaf_insert(leaf_acc->data, k, v, vs);
         if (err) return err;
     }
     return SUCCESS;
@@ -1407,9 +1418,10 @@ static uint64_t do_bulk_delete_fast(SolParameters *params) {
     if (!lh->is_leaf) return ERR_BAD_PATH;
 
     uint16_t deleted = 0;
+    uint16_t vs = th->value_size;
     for (uint8_t i = 0; i < count; i++) {
         const uint8_t *k = params->data + 3 + (uint64_t)i * KEY_SIZE;
-        uint64_t err = leaf_delete(leaf_acc->data, k, NULL);
+        uint64_t err = leaf_delete(leaf_acc->data, k, NULL, vs);
         if (err == SUCCESS) deleted++;
         /* skip not-found silently */
     }
@@ -1457,15 +1469,16 @@ static uint64_t do_find(SolParameters *params) {
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     TreeHeader *th = (TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
+    uint16_t vs = th->value_size;
 
     const uint8_t *key = params->data + 1;
     uint8_t path_len = params->data[1 + KEY_SIZE];
 
-    uint8_t out[1 + VAL_SIZE];
-    sol_memset(out, 0, sizeof(out));
+    uint8_t out[1 + VAL_SIZE_MAX];
+    sol_memset(out, 0, 1 + (uint64_t)vs);
 
     if (th->height == 0) {
-        sol_set_return_data(out, sizeof(out));
+        sol_set_return_data(out, 1 + (uint64_t)vs);
         return SUCCESS;
     }
     if (path_len != th->height) return ERR_BAD_PATH;
@@ -1504,9 +1517,9 @@ static uint64_t do_find(SolParameters *params) {
     int pos = node_lower_bound(leaf->data, key);
     if (pos < lh->key_count && key_cmp(node_keys(leaf->data) + (uint64_t)pos * KEY_SIZE, key) == 0) {
         out[0] = 1;
-        sol_memcpy(out + 1, node_values(leaf->data) + (uint64_t)pos * VAL_SIZE, VAL_SIZE);
+        sol_memcpy(out + 1, node_values(leaf->data) + (uint64_t)pos * vs, vs);
     }
-    sol_set_return_data(out, sizeof(out));
+    sol_set_return_data(out, 1 + (uint64_t)vs);
     return SUCCESS;
 }
 
@@ -1529,6 +1542,8 @@ static uint64_t do_range_scan(SolParameters *params) {
     if (!SolPubkey_same(hdr_acc->owner, params->program_id)) return ERROR_INCORRECT_PROGRAM_ID;
     TreeHeader *th = (TreeHeader *)hdr_acc->data;
     if (th->magic != TORNA_MAGIC) return ERR_BAD_MAGIC;
+    uint16_t vs = th->value_size;
+    uint64_t entry_size = (uint64_t)KEY_SIZE + vs;
 
     const uint8_t *start_key  = params->data + 1;
     const uint8_t *end_key    = params->data + 1 + KEY_SIZE;
@@ -1536,9 +1551,9 @@ static uint64_t do_range_scan(SolParameters *params) {
     uint8_t max_results       = params->data[1 + 2 * KEY_SIZE + 1];
     if (max_results > MAX_RANGE_RESULTS) max_results = MAX_RANGE_RESULTS;
 
-    /* Output buffer: [u16 count][ (key||val) * count ] */
-    uint8_t out[2 + MAX_RANGE_RESULTS * (KEY_SIZE + VAL_SIZE)];
-    sol_memset(out, 0, sizeof(out));
+    /* Output buffer sized to compile-time worst case (KEY_SIZE + VAL_SIZE_MAX). */
+    uint8_t out[2 + MAX_RANGE_RESULTS * (KEY_SIZE + VAL_SIZE_MAX)];
+    sol_memset(out, 0, 2 + (uint64_t)max_results * entry_size);
     uint16_t count = 0;
 
     if (th->height == 0 || max_results == 0) {
@@ -1570,9 +1585,9 @@ static uint64_t do_range_scan(SolParameters *params) {
                 /* past end */
                 goto done;
             }
-            sol_memcpy(out + 2 + (uint64_t)count * (KEY_SIZE + VAL_SIZE), k, KEY_SIZE);
-            sol_memcpy(out + 2 + (uint64_t)count * (KEY_SIZE + VAL_SIZE) + KEY_SIZE,
-                       vals + (uint64_t)idx * VAL_SIZE, VAL_SIZE);
+            sol_memcpy(out + 2 + (uint64_t)count * entry_size, k, KEY_SIZE);
+            sol_memcpy(out + 2 + (uint64_t)count * entry_size + KEY_SIZE,
+                       vals + (uint64_t)idx * vs, vs);
             count++;
         }
         if (count >= max_results) break;
@@ -1594,7 +1609,7 @@ static uint64_t do_range_scan(SolParameters *params) {
 done:
     out[0] = (uint8_t)(count & 0xFF);
     out[1] = (uint8_t)((count >> 8) & 0xFF);
-    sol_set_return_data(out, 2 + (uint64_t)count * (KEY_SIZE + VAL_SIZE));
+    sol_set_return_data(out, 2 + (uint64_t)count * entry_size);
     return SUCCESS;
 }
 

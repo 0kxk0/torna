@@ -15,7 +15,8 @@ import {
 } from "@solana/web3.js";
 
 export const KEY_SIZE = 32;
-export const VAL_SIZE = 32;                      /* v2: 8 → 32 bytes (fits a Pubkey or composite struct) */
+export const VAL_SIZE = 32;                      /* default value_size for trees (overridable at InitTree) */
+export const VAL_SIZE_MAX = 64;                  /* upper bound; same as on-chain VAL_SIZE_MAX */
 export const KEYS_PER_NODE_MAX = 64;
 export const KEYS_ARRAY_SIZE = KEYS_PER_NODE_MAX + 1;
 export const CHILDREN_ARRAY_SIZE = KEYS_ARRAY_SIZE + 1;
@@ -111,7 +112,10 @@ export function decodeTreeHeader(data: Buffer): TreeHeader {
   };
 }
 
-export function decodeNode(data: Buffer): NodeView {
+/** Decode a node. For leaves, `valueSize` controls the per-value byte stride;
+ *  defaults to VAL_SIZE if not supplied. Pass the tree's actual value_size
+ *  (read from the header) for trees that aren't using the default 32. */
+export function decodeNode(data: Buffer, valueSize: number = VAL_SIZE): NodeView {
   const hdr: NodeHeader = {
     isLeaf: data.readUInt8(0) !== 0,
     initialized: data.readUInt8(1) !== 0,
@@ -132,7 +136,7 @@ export function decodeNode(data: Buffer): NodeView {
     const values: Buffer[] = [];
     for (let i = 0; i < hdr.keyCount; i++) {
       values.push(
-        Buffer.from(data.subarray(valOffset + i * VAL_SIZE, valOffset + (i + 1) * VAL_SIZE)),
+        Buffer.from(data.subarray(valOffset + i * valueSize, valOffset + (i + 1) * valueSize)),
       );
     }
     return { hdr, keys, values };
@@ -240,13 +244,15 @@ export function ixBulkInsertFast(args: {
 }): TransactionInstruction {
   if (args.entries.length === 0) throw new Error("entries cannot be empty");
   if (args.entries.length > 255) throw new Error("entries too many (>255)");
+  const vs = args.entries[0].value.length;
+  if (vs < 1 || vs > VAL_SIZE_MAX) throw new Error(`value length ${vs} out of [1, ${VAL_SIZE_MAX}]`);
   for (const e of args.entries) {
     if (e.key.length !== KEY_SIZE) throw new Error("key must be 32 bytes");
-    if (e.value.length !== VAL_SIZE) throw new Error("value must be 32 bytes");
+    if (e.value.length !== vs) throw new Error("all entries must share the same value length");
   }
 
   const count = args.entries.length;
-  const entryBytes = KEY_SIZE + VAL_SIZE;
+  const entryBytes = KEY_SIZE + vs;
   const data = Buffer.alloc(1 + 1 + 1 + count * entryBytes);
   data.writeUInt8(Ix.BulkInsertFast, 0);
   data.writeUInt8(args.pathAccounts.length, 1);
@@ -326,8 +332,12 @@ export function deriveHeaderPda(
 
 /** Build IX_INIT_TREE — program allocates the header PDA via CPI.
  *
- *  ix_data: [disc=0][treeId u32 LE][bump u8][rent_lamports u64 LE]
+ *  ix_data: [disc=0][treeId u32 LE][bump u8][rent_lamports u64 LE][value_size u16 LE]
  *  accounts: [payer(s,w), header_pda(w), system_program]
+ *
+ *  `valueSize` is the per-tree byte width for values; defaults to 32. Must be in
+ *  [1, VAL_SIZE_MAX=64]. Once set at init, every subsequent insert/find/scan
+ *  reads this value_size from the header and uses it for memory strides.
  */
 export function ixInitTree(args: {
   programId: PublicKey;
@@ -336,12 +346,17 @@ export function ixInitTree(args: {
   treeId: number;
   headerBump: number;
   rentLamports: bigint;
+  valueSize?: number;
 }): TransactionInstruction {
-  const data = Buffer.alloc(1 + 4 + 1 + 8);
+  const vs = args.valueSize ?? VAL_SIZE;
+  if (vs < 1 || vs > VAL_SIZE_MAX) throw new Error(`valueSize ${vs} out of [1, ${VAL_SIZE_MAX}]`);
+
+  const data = Buffer.alloc(1 + 4 + 1 + 8 + 2);
   data.writeUInt8(Ix.InitTree, 0);
   data.writeUInt32LE(args.treeId, 1);
   data.writeUInt8(args.headerBump, 5);
   data.writeBigUInt64LE(args.rentLamports, 6);
+  data.writeUInt16LE(vs, 14);
   return new TransactionInstruction({
     programId: args.programId,
     keys: [
@@ -376,27 +391,29 @@ export function ixInsert(args: {
   treeHeader: PublicKey;
   payer: PublicKey;
   key: Buffer;
-  value: Buffer;
+  value: Buffer;                  // length must equal tree's value_size (read from header)
   rentLamports: bigint;
   pathAccounts: PublicKey[]; // root → leaf
   spareAccounts: PublicKey[];
   spareBumps: number[];
 }): TransactionInstruction {
   if (args.key.length !== KEY_SIZE) throw new Error("key must be 32 bytes");
-  if (args.value.length !== VAL_SIZE) throw new Error("value must be 8 bytes");
+  if (args.value.length < 1 || args.value.length > VAL_SIZE_MAX)
+    throw new Error(`value length ${args.value.length} out of [1, ${VAL_SIZE_MAX}]`);
   if (args.pathAccounts.length > 255) throw new Error("path too long");
   if (args.spareAccounts.length > 255) throw new Error("too many spares");
   if (args.spareAccounts.length !== args.spareBumps.length)
     throw new Error("spareAccounts and spareBumps must align");
 
-  const headerLen = 1 + KEY_SIZE + VAL_SIZE + 8 + 1 + 1;
+  const vs = args.value.length;
+  const headerLen = 1 + KEY_SIZE + vs + 8 + 1 + 1;
   const data = Buffer.alloc(headerLen + args.spareBumps.length);
   data.writeUInt8(Ix.Insert, 0);
   args.key.copy(data, 1);
   args.value.copy(data, 1 + KEY_SIZE);
-  data.writeBigUInt64LE(args.rentLamports, 1 + KEY_SIZE + VAL_SIZE);
-  data.writeUInt8(args.pathAccounts.length, 1 + KEY_SIZE + VAL_SIZE + 8);
-  data.writeUInt8(args.spareAccounts.length, 1 + KEY_SIZE + VAL_SIZE + 8 + 1);
+  data.writeBigUInt64LE(args.rentLamports, 1 + KEY_SIZE + vs);
+  data.writeUInt8(args.pathAccounts.length, 1 + KEY_SIZE + vs + 8);
+  data.writeUInt8(args.spareAccounts.length, 1 + KEY_SIZE + vs + 8 + 1);
   for (let i = 0; i < args.spareBumps.length; i++) {
     data.writeUInt8(args.spareBumps[i], headerLen + i);
   }
@@ -428,18 +445,20 @@ export function ixInsertFast(args: {
   treeHeader: PublicKey;
   authority: PublicKey; // must match tree.authority; signs the tx
   key: Buffer;
-  value: Buffer;
+  value: Buffer;                   // length must equal tree's value_size
   pathAccounts: PublicKey[]; // root → leaf; LAST element is the writable leaf
 }): TransactionInstruction {
   if (args.key.length !== KEY_SIZE) throw new Error("key must be 32 bytes");
-  if (args.value.length !== VAL_SIZE) throw new Error("value must be 32 bytes");
+  if (args.value.length < 1 || args.value.length > VAL_SIZE_MAX)
+    throw new Error(`value length ${args.value.length} out of [1, ${VAL_SIZE_MAX}]`);
   if (args.pathAccounts.length === 0) throw new Error("path must contain at least the leaf");
 
-  const data = Buffer.alloc(1 + KEY_SIZE + VAL_SIZE + 1);
+  const vs = args.value.length;
+  const data = Buffer.alloc(1 + KEY_SIZE + vs + 1);
   data.writeUInt8(Ix.InsertFast, 0);
   args.key.copy(data, 1);
   args.value.copy(data, 1 + KEY_SIZE);
-  data.writeUInt8(args.pathAccounts.length, 1 + KEY_SIZE + VAL_SIZE);
+  data.writeUInt8(args.pathAccounts.length, 1 + KEY_SIZE + vs);
 
   const leafIdx = args.pathAccounts.length - 1;
   const keys = [
